@@ -72,7 +72,7 @@ The watch's own face settings, including the inset in the top-right porthole, st
 ### Plane finder
 
 1. Get a GPS fix once (start any GPS activity until it locks). The watch remembers its last position.
-2. In Gadgetbridge, turn on internet access for the watch and allow `api.adsb.lol`.
+2. In Gadgetbridge, turn on internet access for the watch and allow `api.adsb.lol` and `api.adsbdb.com`.
 3. On the watch face, **hold BACK**. Point 12 o'clock at the plane, hold steady while the ring fills, then **let go**.
 
 | Button | Card | Map |
@@ -82,7 +82,11 @@ The watch's own face settings, including the inset in the top-right porthole, st
 | Hold BACK | Aim again | Aim again |
 | BACK | Close | Back to the card |
 
-It searches 25 nm around you and picks the plane nearest your aim. Of two planes along the same line, it picks the nearer one. "match" means the plane sits inside your aim, and "12° off" means it's the closest thing near it. If the compass can't help, the card says "nearest". Aircraft data comes from [adsb.lol](https://adsb.lol), a community ADS-B network.
+It searches 25 nm around you and picks the plane nearest your aim. Of two planes along the same line, it picks the nearer one, and a plane right overhead still counts. In a busy sky it searches again at 10 nm when the 25 nm reply is too big.
+
+The card shows the callsign, the type, the altitude with a climb or descent arrow, and how far away it is. The small plane on the rim is where it sits from 12 o'clock: under the notch means you're on it, and the dotted trail shows which way to turn. If the compass can't help, the card shows a direction (N, SE...) at the top instead.
+
+For airline flights the card swaps between the type and the route (LIS ▸ OPO) every 3 seconds. That costs one small request per flight you look at, and a route that doesn't fit where the plane actually is gets dropped (callsigns get reused). Aircraft data comes from [adsb.lol](https://adsb.lol), a community ADS-B network, and routes from [adsbdb](https://www.adsbdb.com).
 
 Trade-off: after this install, a quick BACK press on the face fires when you let go instead of when you press. That's how the watch tells a press from a hold. To turn the plane finder off, put a file named `PLANEOFF` in `GARMIN/FACES`.
 
@@ -103,7 +107,7 @@ Nothing here adds a timer that runs on its own. Faces repaint when the stock fac
 
 ## Credits
 
-[Gadgetbridge](https://gadgetbridge.org) does all the phone-side work: navigation, weather, music, and the internet proxy the plane finder uses. Aircraft data comes from [adsb.lol](https://adsb.lol).
+[Gadgetbridge](https://gadgetbridge.org) does all the phone-side work: navigation, weather, music, and the internet proxy the plane finder uses. Aircraft data comes from [adsb.lol](https://adsb.lol) and routes from [adsbdb](https://www.adsbdb.com).
 
 OpenInstinct isn't affiliated with or endorsed by Garmin. Garmin and Instinct are trademarks of Garmin Ltd. or its subsidiaries. This repository contains no Garmin firmware.
 

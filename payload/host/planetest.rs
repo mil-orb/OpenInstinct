@@ -221,9 +221,58 @@ fn main() {
     let wrapl = [ac(38.70, -9.139, 30000, 0, 0, "W")];
     let (_, cone) = rank(&wrapl, &own, 0.0, Some(deg(359.0)), 0.0, &mut cands);
     check!(cone == 1, "wrap");
+    // overhead: a jet straight up must not beat the plane aimed at
+    let mut over = [ac(38.671, -9.14, 35000, 0, 4500, "OVER"), ac(38.67, -9.04, 6000, 0, 2500, "AIMED")];
+    let (n, _) = rank(&over, &own, 0.0, Some(deg(90.0)), deg(3.0), &mut cands);
+    let nm = |c: &Cand, l: &[Ac]| String::from_utf8_lossy(&l[c.idx as usize].flight[..flen(&l[c.idx as usize].flight)]).to_string();
+    check!(n >= 1 && nm(&cands[0], &over) == "AIMED", "overhead jet stole the aim: {}", nm(&cands[0], &over));
+    // ...but aimed at it, it still matches
+    let (_, cone) = rank(&over[..1], &own, 0.0, Some(deg(0.0)), deg(3.0), &mut cands);
+    check!(cone == 1, "overhead jet aimed at");
+    // size: a widebody at 12 nm against a light single at 5 nm on one line
+    over[0] = ac(38.67, -9.14 + 12.0 / 60.0 / 0.7815, 33000, 0, 4800, "HEAVY");
+    over[0].cat = 0xA5;
+    over[1] = ac(38.67, -9.14 + 5.0 / 60.0 / 0.7815, 6000, 0, 1100, "LIGHT");
+    over[1].cat = 0xA1;
+    let (n, cone) = rank(&over, &own, 0.0, Some(deg(90.0)), deg(3.0), &mut cands);
+    println!("size: {:?}", cands[..n].iter().map(|c| (nm(c, &over), c.score)).collect::<Vec<_>>());
+    check!(cone == 2 && nm(&cands[0], &over) == "HEAVY", "size-aware tiebreak");
     // no compass: by distance over visibility
     let (n, cone) = rank(&list, &own, 0.0, None, 0.0, &mut cands);
     check!(n >= 3 && cone == 0, "no compass ranking");
+
+
+    // ---- routes (adsbdb reply shape, made-up flight)
+    let body = br#"{"response":{"flightroute":{"callsign":"TAP1301","airline":{"name":"X","icao":"TAP"},
+      "origin":{"country_iso_name":"PT","elevation":374,"iata_code":"LIS","icao_code":"LPPT","latitude":38.7742,"longitude":-9.1342,"municipality":"Lisbon","name":"A"},
+      "destination":{"country_iso_name":"GB","elevation":202,"iata_code":"LGW","icao_code":"EGKK","latitude":51.1481,"longitude":-0.1903,"name":"B"}}}}"#;
+    let r = parse_route(body);
+    check!(r.map(|r| (r.from, r.to)) == Some((*b"LIS\0", *b"LGW\0")), "route codes");
+    let r = r.unwrap();
+    check!(r.pos == [38_774_200, -9_134_200, 51_148_100, -190_300], "route positions {:?}", r.pos);
+    // on the way (over the Bay of Biscay), near the start, and far off it
+    check!(route_fits(&r, 45_000_000, -5_000_000) && route_fits(&r, 38_670_000, -9_140_000), "route fits");
+    check!(!route_fits(&r, 40_640_000, -73_780_000) && !route_fits(&r, 36_000_000, -15_000_000), "route doesn't fit");
+    // a long route doesn't fit a plane far south of it (LHR-JFK over Lisbon)
+    let lj = Route { from: *b"LHR\0", to: *b"JFK\0", pos: [51_470_600, -461_940, 40_639_800, -73_778_900] };
+    check!(route_fits(&lj, 53_000_000, -30_000_000) && !route_fits(&lj, 38_700_000, -9_100_000), "long route");
+    // just behind the departure airport, climbing out the other way
+    check!(route_fits(&r, 38_400_000, -9_500_000), "behind the start");
+    // no IATA code: ICAO; order of the two objects swapped; missing airport
+    let swapped = br#"{"destination":{"iata_code":null,"icao_code":"EGKK","latitude":51.1,"longitude":-0.19},"origin":{"icao_code":"LPPT","iata_code":"LIS","latitude":38.7,"longitude":-9.1}}"#;
+    let r2 = parse_route(swapped);
+    check!(r2.map(|r| (r.from, r.to)) == Some((*b"LIS\0", *b"EGKK")), "route icao fallback and order");
+    check!(parse_route(br#"{"response":"unknown callsign"}"#).is_none(), "unknown callsign");
+    check!(parse_route(br#"{"origin":{"iata_code":"LIS"},"destination":{"iata_code":"LGW"}}"#).is_none(), "route without positions");
+    check!(parse_route(&body[..200]).is_none(), "route cut short");
+    for k in 0..body.len() {
+        let _ = parse_route(&body[..k]);
+    }
+    let mut f = [0u8; 8];
+    f[..7].copy_from_slice(b"TAP1301");
+    let mut g = [0u8; 8];
+    g[..6].copy_from_slice(b"CSAYL1");
+    check!(airline_callsign(&f) && !airline_callsign(&g) && !airline_callsign(&[0; 8]), "airline callsign");
 
     // ---- circular mean across north
     let samples = [deg(355.0), deg(5.0), deg(358.0), deg(2.0)];
@@ -251,7 +300,9 @@ fn main() {
     weird.rate = -32000;
     weird.flags |= F_RATE | F_EMERG | F_MIL;
     for h in [None, Some(0.0), Some(3.0)] {
-        paint_card(&mut d, &CardInfo { ac: &weird, dist_m: 1e9, brg: 1.0, heading: h, index: 39, count: 40, in_cone: false, err: 1.0 });
+        paint_card(&mut d, &CardInfo { ac: &weird, dist_m: 1e9, brg: 1.0, heading: h, route: None, flip: false });
+        let long = Route { from: *b"WWWW", to: *b"MMMM", pos: [0; 4] };
+        paint_card(&mut d, &CardInfo { ac: &weird, dist_m: 1e9, brg: 1.0, heading: h, route: Some(&long), flip: h.is_some() });
     }
     let blips: Vec<Blip> = (0..40)
         .map(|i| Blip { e: (i as f32 - 20.0) * 2000.0, n: (i % 7) as f32 * 3000.0 - 9000.0, track: i as f32, has_track: i % 2 == 0, alt: i * 1000, sel: i == 3, idx: (i % 6) as u8 })

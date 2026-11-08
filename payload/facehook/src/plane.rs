@@ -12,9 +12,14 @@
 //! without a key press. The card does not refetch; the map refetches every
 //! 10 s. Repaints happen only when something on screen moved.
 //!
+//! Routes: while the card shows a flight with an airline callsign, one GET
+//! to api.adsbdb.com asks where it's going (once per flight per session).
+//! The route shows only if the aircraft is plausibly on it.
+//!
 //! Threads: the HTTP reply arrives on the phone link task. It is scanned
-//! there (integers only) into a heap block (`Net`) that the page owns
-//! jointly with the request; an atomic state word says who frees it.
+//! there (integers only) into a heap block (`Net`, or `Rt` for a route) that
+//! the page owns jointly with the request; an atomic state word says who
+//! frees it.
 //!
 //! Off switch: a file named PLANEOFF in GARMIN/FACES on the watch drive.
 
@@ -97,6 +102,9 @@ const LOOKUP_TIMEOUT: u32 = 20_000;
 const MAP_REFRESH: u32 = 15_000; // after the last reply
 const IDLE_CLOSE: u32 = 120_000;
 const LOOKUP_NM: u32 = 25;
+/// Busy sky near a hub: when the 25 nm reply fails or can't be read, one
+/// retry at this radius (about a sixth of the area)
+const RETRY_NM: u32 = 10;
 
 // screens
 const S_AIM: u8 = 0;
@@ -128,57 +136,104 @@ const N_PENDING: u32 = 1;
 const N_DONE: u32 = 2;
 const N_ORPHAN: u32 = 3; // page gone while pending: the callback frees it
 
+const RT_MAGIC: u32 = 0x504c_5254; // "PLRT"
+
+/// Start of both request blocks: the callback only needs this much to know
+/// which one it has and who frees it.
+#[repr(C)]
+struct Hdr {
+    magic: u32,
+    state: AtomicU32,
+    t_done: u32,
+    code: i32, // HTTP code, or -1 transport error, -2 unreadable reply
+}
+
+/// Traffic around the watch.
 #[repr(C)]
 struct Net {
     magic: u32,
     state: AtomicU32,
     t_done: u32,
-    code: i32, // HTTP code, or -1 transport error, -2 unreadable reply
+    code: i32,
     n: u32,
     url: [u8; 80],
     ac: [Ac; MAX_AC],
 }
 
+/// One flight's route, from api.adsbdb.com.
+#[repr(C)]
+struct Rt {
+    magic: u32,
+    state: AtomicU32,
+    t_done: u32,
+    code: i32,
+    hex: u32,
+    got: u32,
+    url: [u8; 48],
+    route: Route,
+}
+
 /// Reply callback, on the phone link task.
 extern "C" fn http_cb(_id: i32, status: i32, body: *const u8, len: u32, code: i32, ctx: usize) {
     unsafe {
-        if ctx < 0x2000_0000 || ctx >= 0x2004_0000 - size_of::<Net>() || ctx & 3 != 0 {
+        if ctx < 0x2000_0000 || ctx >= 0x2004_0000 - size_of::<Rt>() || ctx & 3 != 0 {
             return;
         }
-        let net = &mut *(ctx as *mut Net);
-        if net.magic != NET_MAGIC {
+        let h = &mut *(ctx as *mut Hdr);
+        let big = h.magic == NET_MAGIC;
+        if !big && h.magic != RT_MAGIC || big && ctx >= 0x2004_0000 - size_of::<Net>() {
             return;
         }
         // one load: two would leave a window where destroy orphans it
         // between them and nobody frees it
-        match net.state.load(Ordering::Acquire) {
+        match h.state.load(Ordering::Acquire) {
             N_ORPHAN => {
-                free_net(ctx as *mut Net);
+                free_req(ctx);
                 return;
             }
             N_PENDING => {}
             _ => return,
         }
-        net.n = 0;
-        net.code = if status != 0 { if code > 0 { code } else { -1 } } else { code };
-        if status == 0 && !body.is_null() {
-            let b = core::slice::from_raw_parts(body, len.min(0xffff) as usize);
-            match scan(b, &mut net.ac) {
-                Some(n) => net.n = n as u32,
-                None => net.code = -2,
+        // a failed status with a 2xx code (a reply too big for the phone
+        // link) must not read as an empty sky
+        h.code = if status != 0 { if code > 0 && !(200..300).contains(&code) { code } else { -1 } } else { code };
+        let b = if status == 0 && !body.is_null() { core::slice::from_raw_parts(body, len.min(0xffff) as usize) } else { &[] };
+        if big {
+            let net = &mut *(ctx as *mut Net);
+            net.n = 0;
+            if status == 0 {
+                match scan(b, &mut net.ac) {
+                    Some(n) => net.n = n as u32,
+                    None => net.code = -2,
+                }
+            }
+        } else {
+            let rt = &mut *(ctx as *mut Rt);
+            rt.got = 0;
+            if let Some(r) = parse_route(b) {
+                rt.route = r;
+                rt.got = 1;
             }
         }
-        net.t_done = f0::<u32>(TICK_MS)();
-        if net.state.compare_exchange(N_PENDING, N_DONE, Ordering::AcqRel, Ordering::Acquire).is_err() {
+        h.t_done = f0::<u32>(TICK_MS)();
+        if h.state.compare_exchange(N_PENDING, N_DONE, Ordering::AcqRel, Ordering::Acquire).is_err() {
             // the page let go while we were scanning
-            free_net(ctx as *mut Net);
+            free_req(ctx);
         }
     }
 }
 
-unsafe fn free_net(p: *mut Net) {
-    (*p).magic = 0;
+unsafe fn free_req(p: usize) {
+    *(p as *mut u32) = 0;
     f1::<*mut u8, ()>(FREE)(p as *mut u8);
+}
+
+/// The page lets go of a request block: a pending one goes to its callback,
+/// anything else is freed now.
+unsafe fn drop_req(p: usize) {
+    if p != 0 && (*(p as *const Hdr)).state.compare_exchange(N_PENDING, N_ORPHAN, Ordering::AcqRel, Ordering::Acquire).is_err() {
+        free_req(p);
+    }
 }
 
 // ---- page state ---------------------------------------------------------------------
@@ -192,6 +247,8 @@ struct St {
     tw_n: u32,
     last_ev: u32,
     net: *mut Net,
+    rt: *mut Rt,
+    t_rt: u32,
     t_open: u32,
     t_key: u32,
     t_fetch: u32,
@@ -219,7 +276,11 @@ struct St {
     flags: u8,
     phase: u8,
     pending_lookup: u8,
-    _pad: [u8; 2],
+    /// lookup radius, nm: LOOKUP_NM, or RETRY_NM after a reply too big to read
+    nm: u8,
+    rt_next: u8, // cache slot the next route goes in
+    /// routes asked for this session, by aircraft: one request per flight
+    routes: [Seen; ROUTES],
     ac: [Ac; MAX_AC],
     cand: [Cand; MAX_AC],
     blips: [Blip; MAX_AC],
@@ -230,6 +291,104 @@ struct St {
 
 /// FILL_POLY needs about 14 bytes per vertex; shapes have 10 at most
 const SCRATCH: usize = 160;
+
+const ROUTES: usize = 6;
+const R_NONE: u8 = 0; // asked, nothing usable (unknown, stale, failed)
+const R_OK: u8 = 1;
+
+#[derive(Clone, Copy)]
+#[repr(C)]
+struct Seen {
+    hex: u32, // 0: empty slot
+    got: u8,
+    _pad: [u8; 3],
+    route: Route,
+}
+
+/// What the route cache says for this aircraft: None if never asked.
+fn route_of(st: &St, hex: u32) -> Option<&Seen> {
+    st.routes.iter().find(|s| s.hex == hex && hex != 0)
+}
+
+/// On the card: take a finished route reply, then ask for the selected
+/// aircraft's route if it has an airline callsign and wasn't asked yet.
+/// One small request per flight shown, none while another is in flight.
+/// True when the card should repaint.
+#[inline(never)]
+unsafe fn route_tick(st: &mut St, a: &Ac) -> bool {
+    let t = now();
+    let mut dirty = false;
+    if !st.rt.is_null() {
+        let rt = &mut *st.rt;
+        let s = rt.state.load(Ordering::Acquire);
+        let late = s == N_PENDING && t.wrapping_sub(st.t_rt) > LOOKUP_TIMEOUT;
+        if s == N_DONE || late {
+            let mut seen = Seen { hex: rt.hex, got: R_NONE, _pad: [0; 3], route: rt.route };
+            if s == N_DONE && rt.got != 0 && rt.code >= 200 && rt.code < 300 {
+                // judged against where the aircraft is now
+                if let Some(p) = st.ac[..st.n_ac as usize].iter().find(|p| p.hex == rt.hex) {
+                    if route_fits(&rt.route, p.lat, p.lon) {
+                        seen.got = R_OK;
+                    }
+                }
+            }
+            let k = st.rt_next as usize % ROUTES;
+            st.routes[k] = seen;
+            st.rt_next = st.rt_next.wrapping_add(1);
+            if late {
+                drop_req(st.rt as usize);
+                st.rt = core::ptr::null_mut();
+            } else {
+                rt.state.store(N_IDLE, Ordering::Release);
+            }
+            dirty = true;
+        }
+    }
+    if !airline_callsign(&a.flight) || route_of(st, a.hex).is_some() {
+        return dirty;
+    }
+    if st.rt.is_null() {
+        let p = f1::<u32, *mut u8>(MALLOC)(size_of::<Rt>() as u32);
+        if p.is_null() {
+            return dirty;
+        }
+        write_bytes(p, 0, size_of::<Rt>());
+        st.rt = p as *mut Rt;
+        (*st.rt).magic = RT_MAGIC;
+    }
+    let rt = &mut *st.rt;
+    if rt.state.load(Ordering::Acquire) != N_IDLE {
+        return dirty;
+    }
+    const URL: &[u8] = b"https://api.adsbdb.com/v0/callsign/";
+    rt.url[..URL.len()].copy_from_slice(URL);
+    let n = flen(&a.flight);
+    rt.url[URL.len()..URL.len() + n].copy_from_slice(&a.flight[..n]);
+    rt.url[URL.len() + n] = 0;
+    rt.hex = a.hex;
+    st.t_rt = t;
+    if !send(rt.url.as_ptr(), st.rt as usize) {
+        rt.state.store(N_DONE, Ordering::Release); // recorded as no route next tick
+        rt.code = -1;
+    }
+    dirty
+}
+
+/// GET `url` (NUL-terminated) through the phone; the reply goes to http_cb
+/// with `blk`, a request block whose header is marked pending here. False
+/// when the phone has no HTTP (the block is left pending: the caller resets
+/// it).
+#[inline(never)]
+unsafe fn send(url: *const u8, blk: usize) -> bool {
+    let mut req = [0u32; 32];
+    let r = req.as_mut_ptr() as *mut u8;
+    f1::<*mut u8, ()>(HTTP_INIT)(r);
+    *(r.add(REQ_URL) as *mut usize) = url as usize;
+    *(r.add(REQ_CB) as *mut usize) = http_cb as *const () as usize | 1;
+    *(r.add(REQ_CTX) as *mut usize) = blk;
+    (*(blk as *const Hdr)).state.store(N_PENDING, Ordering::Release);
+    f1::<*mut u8, i32>(HTTP_SEND)(r) >= 0
+}
 
 unsafe fn now() -> u32 {
     f0::<u32>(TICK_MS)()
@@ -369,15 +528,7 @@ unsafe fn fetch(st: &mut St, nm: u32) -> Result<(), u8> {
     net.url[n] = b'0' + (nm % 10) as u8;
     net.url[n + 1] = 0;
 
-    let mut req = [0u32; 32];
-    let r = req.as_mut_ptr() as *mut u8;
-    f1::<*mut u8, ()>(HTTP_INIT)(r);
-    *(r.add(REQ_URL) as *mut usize) = net.url.as_ptr() as usize;
-    *(r.add(REQ_CB) as *mut usize) = http_cb as *const () as usize | 1;
-    *(r.add(REQ_CTX) as *mut usize) = st.net as usize;
-    net.state.store(N_PENDING, Ordering::Release);
-    let id = f1::<*mut u8, i32>(HTTP_SEND)(r);
-    if id < 0 {
+    if !send(net.url.as_ptr(), st.net as usize) {
         net.state.store(N_IDLE, Ordering::Release);
         return Err(E_HTTP);
     }
@@ -468,6 +619,7 @@ unsafe fn begin_aim(st: &mut St) {
     st.screen = S_AIM;
     st.err = 0;
     st.pending_lookup = 0;
+    st.nm = LOOKUP_NM as u8;
     if st.slot < 0 {
         st.slot = f1::<u32, i32>(COMPASS_REG)(120);
     }
@@ -522,7 +674,7 @@ unsafe fn release(st: &mut St) {
     }
     st.flags |= F_AIM_DONE;
     st.pending_lookup = 1;
-    if let Err(e) = fetch(st, LOOKUP_NM) {
+    if let Err(e) = fetch(st, st.nm as u32) {
         fail(st, e);
     }
 }
@@ -604,14 +756,10 @@ unsafe fn destroy() {
         f1::<i32, ()>(COMPASS_REL)(st.slot);
         st.slot = -1;
     }
-    if !st.net.is_null() {
-        let net = st.net;
-        st.net = core::ptr::null_mut();
-        // pending: hand it to the callback; anything else: ours to free
-        if (*net).state.compare_exchange(N_PENDING, N_ORPHAN, Ordering::AcqRel, Ordering::Acquire).is_err() {
-            free_net(net);
-        }
-    }
+    drop_req(st.net as usize);
+    drop_req(st.rt as usize);
+    st.net = core::ptr::null_mut();
+    st.rt = core::ptr::null_mut();
     st.magic = 0;
 }
 
@@ -685,6 +833,12 @@ unsafe fn tick() {
             } else if st.flags & F_AIM_DONE != 0 {
                 dirty = true; // seconds counter
                 match got {
+                    Some(false) if st.code < 0 && st.nm as u32 > RETRY_NM => {
+                        st.nm = RETRY_NM as u8;
+                        if let Err(e) = fetch(st, RETRY_NM) {
+                            fail(st, e);
+                        }
+                    }
                     Some(false) => fail(st, E_CODE),
                     Some(true) if st.pending_lookup != 0 => finish_lookup(st),
                     _ => {
@@ -700,6 +854,11 @@ unsafe fn tick() {
                 rerank(st);
                 dirty = true;
             }
+            let n = st.n_cand as usize;
+            if n > 0 {
+                let a = st.ac[st.cand[st.sel as usize % n].idx as usize % MAX_AC];
+                dirty |= route_tick(st, &a);
+            }
         }
         S_MAP => {
             if got == Some(true) {
@@ -707,7 +866,7 @@ unsafe fn tick() {
                 dirty = true;
             }
             if t.wrapping_sub(st.t_fetch.max(st.t_data)) > MAP_REFRESH {
-                let _ = fetch(st, LOOKUP_NM);
+                let _ = fetch(st, st.nm as u32);
             }
         }
         _ => {}
@@ -762,7 +921,7 @@ unsafe fn key(k: u8) {
             S_CARD | S_ERR if st.flags & F_DATA != 0 || st.err == E_EMPTY || st.err == E_NONE_THERE => {
                 st.screen = S_MAP;
                 if ZOOMS_NM[st.zoom as usize % 3] > 20 {
-                    let _ = fetch(st, 25);
+                    let _ = fetch(st, st.nm as u32);
                 }
             }
             _ => return,
@@ -780,7 +939,7 @@ unsafe fn key(k: u8) {
                     let nz = if down { (z + 1).min(2) } else { z.saturating_sub(1) };
                     st.zoom = nz as u8;
                     if ZOOMS_NM[nz] > 20 && ZOOMS_NM[z] <= 20 {
-                        let _ = fetch(st, 25);
+                        let _ = fetch(st, st.nm as u32);
                     }
                 }
                 _ => return,
@@ -948,11 +1107,8 @@ unsafe fn paint() {
                     dist_m: sqrt(e * e + nn * nn),
                     brg: atan2(e, nn),
                     heading: live,
-                    index: st.sel as usize,
-                    count: n,
-                    in_cone: c.cone != 0,
-                    // negative: ranked by distance (the aim matched nothing)
-                    err: if st.flags & F_HEAD != 0 { c.err } else { -1.0 },
+                    route: route_of(st, a.hex).filter(|s| s.got == R_OK).map(|s| &s.route),
+                    flip: (t / 3000) & 1 != 0,
                 },
             );
         }

@@ -35,6 +35,24 @@ impl Draw for Rec {
     }
 }
 
+/// Made-up routes in adsbdb's reply format, run through the real parser and
+/// the plausibility check, as the watch does.
+fn route_for(a: &Ac) -> Option<Route> {
+    let (o, d) = match &a.flight[..flen(&a.flight)] {
+        b"TAP1301" => (("LIS", "LPPT", 38.7742, -9.1342), ("OPO", "LPPR", 41.2481, -8.6814)),
+        b"RYR8HK" => (("FAO", "LPFR", 37.0144, -7.9659), ("DUB", "EIDW", 53.4213, -6.2701)),
+        b"EZY62QL" => (("LIS", "LPPT", 38.7742, -9.1342), ("LGW", "EGKK", 51.1481, -0.1903)),
+        b"AFR1025" => (("CDG", "LFPG", 49.0097, 2.5479), ("LIS", "LPPT", 38.7742, -9.1342)),
+        _ => return None,
+    };
+    let ap = |x: (&str, &str, f64, f64)| format!(
+        "{{\"country_iso_name\":\"XX\",\"elevation\":100,\"iata_code\":\"{}\",\"icao_code\":\"{}\",\"latitude\":{},\"longitude\":{},\"name\":\"Airport\"}}",
+        x.0, x.1, x.2, x.3);
+    let body = format!("{{\"response\":{{\"flightroute\":{{\"callsign\":\"X\",\"origin\":{},\"destination\":{}}}}}}}", ap(o), ap(d));
+    let r = parse_route(body.as_bytes())?;
+    route_fits(&r, a.lat, a.lon).then_some(r)
+}
+
 fn main() {
     let mut args = std::env::args().skip(1);
     let mpath = args.next().expect("metrics file");
@@ -95,10 +113,8 @@ fn main() {
                 dist_m: sqrt(e * e + nn * nn),
                 brg: atan2(e, nn),
                 heading: live.map(|d| d * DEG),
-                index: sel_off,
-                count: cn,
-                in_cone: c.cone != 0,
-                err: c.err,
+                route: route_for(a).as_ref(),
+                flip: false,
             },
         );
         eprintln!("{name}: {} candidates, {} in cone", cn, cone);
@@ -157,7 +173,7 @@ fn main() {
         let (e, nn) = enu(&own, a, 0.0);
         frame(&mut r, what);
         paint_card(&mut r, &CardInfo { ac: a, dist_m: sqrt(e * e + nn * nn), brg: atan2(e, nn), heading: Some(4.0 * DEG),
-            index: sel_off, count: cn, in_cone: c.cone != 0, err: c.err });
+            route: route_for(a).as_ref(), flip: false });
     }
     frame(&mut r, "map");
     paint_map(&mut r, &blips, acs, Some(4.0 * DEG), 25);

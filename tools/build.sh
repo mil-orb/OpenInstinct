@@ -31,8 +31,8 @@ from bw import bw, bl, sym
 NAV_ELF, NAV_BIN = "payload/build/navhook.elf", "payload/build/navhook.bin"
 FACE_ELF, FACE_BIN = "payload/build/facehook.elf", "payload/build/facehook.bin"
 # free 0xff run in 19.10: 0xf41ca-0xfffff. Faces at 0xf4200 may grow up to
-# the nav payload, which takes the top 11 KB.
-FACE_AT, NAV_AT, FREE_END = 0xF4200, 0xFD400, 0x100000
+# the nav payload, which takes the top 10.25 KB.
+FACE_AT, NAV_AT, FREE_END = 0xF4200, 0xFD700, 0x100000
 
 def hook10(at, old, target):
     # ldr.w pc, [pc, #4]; nop; .word target|1  (at must be 2 mod 4 so the

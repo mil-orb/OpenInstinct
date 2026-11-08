@@ -27,7 +27,7 @@ pub trait Draw {
 }
 ```
 
-On the watch, `text` uses the firmware's own fonts, which load at run time. Lay out from `metrics()` and `width()`, never fixed sizes. `planecore.rs` has `fit_c` and `fit_l` (cut text until it fits) and `box_ok` (is a box inside the round window and clear of the porthole). Use them for every line.
+On the watch, `text` uses the firmware's own fonts, which load at run time. Lay out from `metrics()` and `width()`, never fixed sizes. `planecore.rs` has `fit_c` (cut text until it fits) and `box_ok` (is a box inside the round window and clear of the porthole). Use them for every line.
 
 ## Life of a page
 
@@ -62,7 +62,7 @@ Firmware calls are plain function pointers at fixed addresses in 19.10 (`const`s
 
 ### HTTP without crashing
 
-The reply callback can arrive after the page is gone, or never. The plane finder keeps the request's buffer in a separate block with an atomic state: idle, pending, or orphaned. `destroy` and timeouts mark a pending request orphaned, and the callback frees an orphaned block instead of touching the page. Copy that pattern (`Net`, `http_cb`, `fetch`, `free_net`) rather than writing your own.
+The reply callback can arrive after the page is gone, or never. The plane finder keeps the request's buffer in a separate block with an atomic state: idle, pending, or orphaned. `destroy` and timeouts mark a pending request orphaned, and the callback frees an orphaned block instead of touching the page. Copy that pattern (`Hdr`, `http_cb`, `send`, `drop_req`; the route lookup `Rt` is a second user) rather than writing your own.
 
 A reply over 64 KB fails (the plane finder shows "unreadable reply"), so keep requests small. The plane finder asks for one radius around you, about 500 bytes per aircraft.
 
@@ -77,7 +77,7 @@ A reply over 64 KB fails (the plane finder shows "unreadable reply"), so keep re
 2. Write `payload/host/<app>test.rs` and `<app>mock.rs` (copy the plane ones) and get the tests passing and the mock screens looking right.
 3. Write `payload/facehook/src/<app>.rs` with the page handler, `open()`, and a `Draw` for the watch (copy `Gfx` from `plane.rs`). Add `mod <app>;` in `lib.rs`, and hook a key event in `page_entry` to open it.
 4. Give your page flags: `page_flags_entry` in `lib.rs` answers for `plane_page`. Add your handler the same way.
-5. Build with `sh tools/build.sh ...` and watch the "free after faces" figure. The face loader and all apps share one region (about 0.5 KB free right now), so size matters. `opt-level=z` and LTO are already on, and the next step is moving code into the nav region or finding more free flash.
+5. Build with `sh tools/build.sh ...` and watch the "free after faces" figure. The face loader and all apps share one region (about 0.6 KB free right now), so size matters. `opt-level=z` and LTO are already on, and the next step is moving code into the nav region or finding more free flash.
 6. Flash with the stock 19.10 file at hand ([RECOVERY.md](RECOVERY.md)).
 
 Ideas that fit the same pattern: a tide or weather detail page, a transit departure board, a phone finder, a "where did I park" compass page.

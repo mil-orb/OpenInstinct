@@ -12,6 +12,7 @@ How the repo fits together, how to build it, and how to test changes on your PC 
 | `payload/build.sh`, `build_face.sh` | Build the two payloads into `payload/build/*.bin`. |
 | `tools/build.sh` | Builds both payloads and patches them into your stock update file. |
 | `tools/patchgcd.py`, `gcd.py` | Read and write Garmin's GCD update format. |
+| `tools/bw.py`, `elf2bin.py` | Encode the branch each hook writes, and turn a payload ELF into a flat binary. |
 | `tools/mock/` | Renders the nav and plane screens to PNGs from the same Rust code. |
 | `tools/media/` | Makes the GIFs in `media/`. |
 | `faces/` | The face kit, the bundled faces' source, and prebuilt examples. |
@@ -23,11 +24,11 @@ The firmware has one free run of flash at `0xf41ca`..`0xfffff`. The build puts:
 | Payload | Address | Entry points |
 |---|---|---|
 | Faces, page hooks, plane finder | `0xf4200` | `face_entry`, `page_entry`, `tick_entry`, `page_flags_entry` |
-| Navigation | `0xfd400` (top 11 KB) | `nav_entry`, `tick_entry`, `vibe_entry`, `evt_entry`, `alert_entry` |
+| Navigation | `0xfd700` (top 10.25 KB) | `nav_entry`, `tick_entry`, `vibe_entry`, `evt_entry`, `alert_entry` |
 
 Each hook overwrites the first instruction of a stock function (or one call or one constant) with a branch into a payload. Every hook, with the bytes it expects to find and the bytes it writes, is listed in `tools/build.sh` with a comment on what it does.
 
-The faces payload grows upward toward the nav payload. The build prints how much room is left ("free after faces"). It's about 0.5 KB now, which is the main limit on new features.
+The faces payload grows upward toward the nav payload. The build prints how much room is left ("free after faces"). It's about 0.6 KB now, which is the main limit on new features.
 
 ## Toolchain
 

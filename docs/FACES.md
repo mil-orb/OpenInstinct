@@ -20,7 +20,7 @@ Copy `hello.py` to start your own. Change `Face("HELLO")` to your face's name (i
 - **The porthole** (top right) is a second small display behind a black ring, centred near (106, 21.5) with radius about 23. Its ring hides pixels out to about r 31 from that centre. Keep text and fine detail out of it unless the face draws the porthole itself (`own_inset`, below).
 - **Coordinates** are pixels from the top left. Hands, ticks and dots use 1/16 px internally, so (64, 64) is the exact centre.
 
-`python faces/bezel_audit.py` lists every op in every built face that draws outside the visible window. `python faces/bezel_sheet.py` makes a contact sheet with hidden ink shown in red.
+`python faces/bezel_audit.py` lists every op in every built face that draws outside the visible window. `python faces/bezel_sheet.py` makes a contact sheet with hidden ink shown in red. If your watch's bezel looks different, `python faces/src/calibrate.py` builds `CAL.FACE`, a ruler face: the outermost arc you can see all the way round is your usable radius.
 
 ## Building blocks
 

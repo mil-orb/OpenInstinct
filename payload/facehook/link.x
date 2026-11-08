@@ -1,7 +1,7 @@
 /* Face loader, in the 0xff padding at the end of the internal app region
-   (0xf41ca-0xfffff in 19.10), below the nav payload at 0xfd400.
+   (0xf41ca-0xfffff in 19.10), below the nav payload at 0xfd700.
    Code and constants only. */
-MEMORY { FREE (rx) : ORIGIN = 0x000f4200, LENGTH = 0x9200 }
+MEMORY { FREE (rx) : ORIGIN = 0x000f4200, LENGTH = 0x9500 }
 ENTRY(face_entry)
 SECTIONS
 {

@@ -1,6 +1,6 @@
 #!/bin/sh
 # Build of the nav payload: rustc (RUST_TOOLCHAIN, default 1.98.1) + its rust-src + bundled rust-lld.
-# Produces build/navhook.elf and build/navhook.bin (raw bytes for 0xfd400).
+# Produces build/navhook.elf and build/navhook.bin (raw bytes for 0xfd700).
 set -e
 cd "$(dirname "$0")"
 RUST="${RUST_TOOLCHAIN:-1.98.1}"

@@ -623,6 +623,19 @@ pub fn visible_m(a: &Ac) -> f32 {
     nm * M_PER_NM
 }
 
+/// How big it looks next to an airliner, from the emitter category. The
+/// nearest-wins tiebreak divides distance by this, so a widebody (64 m
+/// wingspan) at 12 nm and a light single (11 m) at 8 nm on the same line
+/// rank about even.
+pub fn size(a: &Ac) -> f32 {
+    match a.cat {
+        0xA5 => 1.6,
+        0xA3 | 0xA4 => 1.2,
+        0xA1 | 0xA7 | 0xB1..=0xB4 | 0xB6 => 0.6,
+        _ => 1.0,
+    }
+}
+
 // ---- matching -----------------------------------------------------------------
 
 /// One candidate for the aimed direction.
@@ -649,6 +662,9 @@ pub const ERR_MAX: f32 = 60.0 * DEG;
 const POS_UNC_M: f32 = 150.0;
 /// Uncertainty in when the snapshot was taken versus the aim, s.
 const TIME_UNC_S: f32 = 1.5;
+/// The bearing error shrinks with elevation (cos), but no further than at
+/// 65 degrees up: without the floor a plane straight overhead fits every aim.
+pub const ELEV_FLOOR: f32 = 0.42;
 
 pub fn tolerance(spread: f32) -> f32 {
     (TOL_BASE + 1.5 * spread).min(TOL_MAX)
@@ -658,8 +674,8 @@ pub fn tolerance(spread: f32) -> f32 {
 /// clockwise from true north; None = no compass) with circular spread
 /// `spread` (rad), `dt` seconds after the reply. In-cone candidates come
 /// first, best first: angular error against the cone plus straight-line
-/// distance (0.35 per 10 nm), so of two planes along the same line the nearer
-/// wins. Aircraft farther than they can be seen (visible_m) are left out. The
+/// distance over size (0.35 per 10 nm for an airliner), so of two planes
+/// along the same line the one that looks bigger wins. Aircraft farther than they can be seen (visible_m) are left out. The
 /// rest follow by angular error. Returns (count,
 /// in-cone count).
 pub fn rank(acs: &[Ac], own: &Own, dt: f32, heading: Option<f32>, spread: f32, out: &mut [Cand]) -> (usize, usize) {
@@ -681,8 +697,8 @@ pub fn rank(acs: &[Ac], own: &Own, dt: f32, heading: Option<f32>, spread: f32, o
         let (err, cone, score) = match heading {
             Some(h) => {
                 // the aim is direction only: high up, a bearing error is a
-                // smaller miss in the sky (cos elevation)
-                let err = abs(wrap(atan2(e, nn) - h)) * dist / slant.max(1.0);
+                // smaller miss in the sky (cos elevation, floored)
+                let err = abs(wrap(atan2(e, nn) - h)) * (dist / slant.max(1.0)).max(ELEV_FLOOR);
                 if err > ERR_MAX {
                     continue;
                 }
@@ -692,7 +708,7 @@ pub fn rank(acs: &[Ac], own: &Own, dt: f32, heading: Option<f32>, spread: f32, o
                 let tol = tol + atan2(unc, dist.max(1.0)).min(TOL_MAX);
                 let r = err / tol;
                 let cone = err <= tol;
-                let s = if cone { r * r + 0.35 * slant / (10.0 * M_PER_NM) } else { 10.0 + err };
+                let s = if cone { r * r + 0.35 * slant / (10.0 * M_PER_NM * size(a)) } else { 10.0 + err };
                 (err, cone, s)
             }
             None => (0.0, false, slant),
@@ -724,6 +740,110 @@ pub fn circ_mean(ss: f32, sc: f32, n: u32) -> Option<(f32, f32)> {
         return None; // samples all over the place
     }
     Some((atan2(ms, mc), sqrt(2.0 * (1.0 - r))))
+}
+
+// ---- routes -----------------------------------------------------------------
+
+/// Where a flight is going, from an adsbdb callsign reply: airport codes
+/// (IATA, else ICAO, NUL padded) and positions in 1e-6 deg.
+#[derive(Clone, Copy)]
+#[repr(C)]
+pub struct Route {
+    pub from: [u8; 4],
+    pub to: [u8; 4],
+    pub pos: [i32; 4], // from lat, lon, to lat, lon
+}
+
+impl Route {
+    pub const ZERO: Route = Route { from: [0; 4], to: [0; 4], pos: [0; 4] };
+}
+
+/// Index just past `"key":` in `b`, whitespace skipped; None if absent.
+fn value_at(b: &[u8], key: &[u8]) -> Option<usize> {
+    let n = key.len();
+    let mut i = 0;
+    while i + n + 2 < b.len() {
+        if b[i] == b'"' && b[i + n + 1] == b'"' && &b[i + 1..i + 1 + n] == key {
+            let mut c = Cur { b, i: i + n + 2 };
+            if c.eat(b':') {
+                c.ws();
+                return Some(c.i);
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
+/// One airport object (the bytes from its key to the next one): code and
+/// position. False if either is missing.
+fn airport(seg: &[u8], code: &mut [u8; 4], pos: &mut [i32]) -> bool {
+    let mut got = false;
+    // ICAO first, so IATA wins when both are there
+    for key in [&b"icao_code"[..], b"iata_code"] {
+        if let Some(i) = value_at(seg, key) {
+            if let Some(s) = (Cur { b: seg, i }).string() {
+                if (3..=4).contains(&s.len()) && s.iter().all(|c| c.is_ascii_alphanumeric()) {
+                    *code = [0; 4];
+                    code[..s.len()].copy_from_slice(s);
+                    got = true;
+                }
+            }
+        }
+    }
+    for (k, key) in [&b"latitude"[..], b"longitude"].iter().enumerate() {
+        let v = value_at(seg, key).and_then(|i| {
+            let t = &seg[i..];
+            let e = t.iter().position(|c| !matches!(c, b'-' | b'.' | b'0'..=b'9')).unwrap_or(t.len());
+            parse_fixed(&t[..e], 6)
+        });
+        match v {
+            Some(v) if v.unsigned_abs() <= 180_000_000 => pos[k] = v,
+            _ => got = false,
+        }
+    }
+    got
+}
+
+/// Parse an adsbdb /v0/callsign reply. None for "unknown callsign" or
+/// anything without both airports.
+pub fn parse_route(body: &[u8]) -> Option<Route> {
+    let o = value_at(body, b"origin")?;
+    let d = value_at(body, b"destination")?;
+    let seg = |a: usize, b: usize| if a < b { &body[a..b] } else { &body[a..] };
+    let mut r = Route::ZERO;
+    let (p0, p1) = r.pos.split_at_mut(2);
+    if airport(seg(o, d), &mut r.from, p0) && airport(seg(d, o), &mut r.to, p1) {
+        Some(r)
+    } else {
+        None
+    }
+}
+
+/// Central angle between two points (1e-6 deg), rad.
+fn arc(a: &[i32], b: &[i32]) -> f32 {
+    let r = |v: i32| v as f32 * 1e-6 * DEG;
+    let s1 = sin((r(b[0]) - r(a[0])) * 0.5);
+    let s2 = sin(wrap(r(b[1]) - r(a[1])) * 0.5);
+    let h = (s1 * s1 + cos(r(a[0])) * cos(r(b[0])) * s2 * s2).clamp(0.0, 1.0);
+    2.0 * atan2(sqrt(h), sqrt(1.0 - h))
+}
+
+/// Could an aircraft at (lat, lon) be flying this route? Callsign routes go
+/// stale (schedule changes, charters reusing a number), so the route only
+/// shows when the detour through the aircraft is at most 10 % longer than
+/// the direct great circle (airways and oceanic tracks add a few percent),
+/// plus 200 km for climbs, holds and approaches near either airport. A
+/// London to New York flight over Lisbon would be a 26 % detour: rejected.
+pub fn route_fits(r: &Route, lat: i32, lon: i32) -> bool {
+    let p = [lat, lon];
+    arc(&r.pos[..2], &p) + arc(&p, &r.pos[2..]) <= 1.10 * arc(&r.pos[..2], &r.pos[2..]) + 0.0314
+}
+
+/// Worth asking for a route: an airline-style callsign (three letters, then
+/// a digit). Registrations used as callsigns never have one.
+pub fn airline_callsign(f: &[u8; 8]) -> bool {
+    f[..3].iter().all(|c| c.is_ascii_uppercase()) && f[3].is_ascii_digit()
 }
 
 // ---- text -------------------------------------------------------------------
@@ -805,89 +925,89 @@ impl Default for Buf {
 }
 
 /// Common ICAO type designators with the name people use for them.
-const TYPES: &[(&[u8; 4], &[u8])] = &[
-    (b"A19N", b"A319neo"),
-    (b"A20N", b"A320neo"),
-    (b"A21N", b"A321neo"),
-    (b"A319", b"Airbus A319"),
-    (b"A320", b"Airbus A320"),
-    (b"A321", b"Airbus A321"),
-    (b"A332", b"A330-200"),
-    (b"A333", b"A330-300"),
-    (b"A339", b"A330-900"),
-    (b"A359", b"A350-900"),
-    (b"A35K", b"A350-1000"),
-    (b"A388", b"A380"),
-    (b"BCS1", b"A220-100"),
-    (b"BCS3", b"A220-300"),
-    (b"B712", b"Boeing 717"),
-    (b"B737", b"737-700"),
-    (b"B738", b"737-800"),
-    (b"B739", b"737-900"),
-    (b"B37M", b"737 MAX 7"),
-    (b"B38M", b"737 MAX 8"),
-    (b"B39M", b"737 MAX 9"),
-    (b"B3XM", b"737 MAX 10"),
-    (b"B744", b"747-400"),
-    (b"B748", b"747-8"),
-    (b"B752", b"757-200"),
-    (b"B753", b"757-300"),
-    (b"B762", b"767-200"),
-    (b"B763", b"767-300"),
-    (b"B764", b"767-400"),
-    (b"B772", b"777-200"),
-    (b"B77L", b"777-200LR"),
-    (b"B77W", b"777-300ER"),
-    (b"B788", b"787-8"),
-    (b"B789", b"787-9"),
-    (b"B78X", b"787-10"),
-    (b"MD11", b"MD-11"),
-    (b"E170", b"Embraer 170"),
-    (b"E75L", b"Embraer 175"),
-    (b"E75S", b"Embraer 175"),
-    (b"E190", b"Embraer 190"),
-    (b"E195", b"Embraer 195"),
-    (b"E290", b"E190-E2"),
-    (b"CRJ2", b"CRJ-200"),
-    (b"CRJ7", b"CRJ-700"),
-    (b"CRJ9", b"CRJ-900"),
-    (b"DH8D", b"Dash 8-400"),
-    (b"AT76", b"ATR 72"),
-    (b"B190", b"Beech 1900"),
-    (b"BE20", b"King Air 200"),
-    (b"BE9L", b"King Air 90"),
-    (b"PC12", b"Pilatus PC-12"),
-    (b"C208", b"Cessna Caravan"),
-    (b"C172", b"Cessna 172"),
-    (b"C182", b"Cessna 182"),
-    (b"C152", b"Cessna 152"),
-    (b"P28A", b"Piper Cherokee"),
-    (b"SR22", b"Cirrus SR22"),
-    (b"SF50", b"Cirrus Jet"),
-    (b"C56X", b"Citation Excel"),
-    (b"C68A", b"Citation Latitude"),
-    (b"E55P", b"Phenom 300"),
-    (b"CL35", b"Challenger 350"),
-    (b"GLF4", b"Gulfstream IV"),
-    (b"GLF5", b"Gulfstream V"),
-    (b"GL5T", b"Global 5000"),
-    (b"B06\0", b"Bell 206"),
-    (b"B407", b"Bell 407"),
-    (b"EC35", b"Airbus H135"),
-    (b"EC45", b"Airbus H145"),
-    (b"AS50", b"AStar"),
-    (b"R44\0", b"Robinson R44"),
-    (b"H60\0", b"Black Hawk"),
-    (b"C130", b"Hercules"),
-    (b"C17\0", b"C-17"),
-    (b"K35R", b"KC-135"),
-];
+const TYPES: &[u8] = b"\
+A19N:A319neo\n\
+A20N:A320neo\n\
+A21N:A321neo\n\
+A319:Airbus A319\n\
+A320:Airbus A320\n\
+A321:Airbus A321\n\
+A332:A330-200\n\
+A333:A330-300\n\
+A339:A330-900\n\
+A359:A350-900\n\
+A35K:A350-1000\n\
+A388:A380\n\
+BCS1:A220-100\n\
+BCS3:A220-300\n\
+B712:Boeing 717\n\
+B737:737-700\n\
+B738:737-800\n\
+B739:737-900\n\
+B37M:737 MAX 7\n\
+B38M:737 MAX 8\n\
+B39M:737 MAX 9\n\
+B3XM:737 MAX 10\n\
+B744:747-400\n\
+B748:747-8\n\
+B752:757-200\n\
+B753:757-300\n\
+B762:767-200\n\
+B763:767-300\n\
+B764:767-400\n\
+B772:777-200\n\
+B77L:777-200LR\n\
+B77W:777-300ER\n\
+B788:787-8\n\
+B789:787-9\n\
+B78X:787-10\n\
+MD11:MD-11\n\
+E170:Embraer 170\n\
+E75L:Embraer 175\n\
+E75S:Embraer 175\n\
+E190:Embraer 190\n\
+E195:Embraer 195\n\
+E290:E190-E2\n\
+CRJ2:CRJ-200\n\
+CRJ7:CRJ-700\n\
+CRJ9:CRJ-900\n\
+DH8D:Dash 8-400\n\
+AT76:ATR 72\n\
+B190:Beech 1900\n\
+BE20:King Air 200\n\
+BE9L:King Air 90\n\
+PC12:Pilatus PC-12\n\
+C208:Cessna Caravan\n\
+C172:Cessna 172\n\
+C182:Cessna 182\n\
+C152:Cessna 152\n\
+P28A:Piper Cherokee\n\
+SR22:Cirrus SR22\n\
+SF50:Cirrus Jet\n\
+C56X:Citation Excel\n\
+C68A:Citation Latitude\n\
+E55P:Phenom 300\n\
+CL35:Challenger 350\n\
+GLF4:Gulfstream IV\n\
+GLF5:Gulfstream V\n\
+GL5T:Global 5000\n\
+B06:Bell 206\n\
+B407:Bell 407\n\
+EC35:Airbus H135\n\
+EC45:Airbus H145\n\
+AS50:AStar\n\
+R44:Robinson R44\n\
+H60:Black Hawk\n\
+C130:Hercules\n\
+C17:C-17\n\
+K35R:KC-135";
 
 pub fn type_name(t: &[u8; 4]) -> Option<&'static [u8]> {
-    TYPES.iter().find(|(k, _)| {
-        let n = flen(&k[..]);
-        flen(t) == n && k[..n] == t[..n]
-    }).map(|(_, v)| *v)
+    let t = &t[..flen(t)];
+    TYPES.split(|&c| c == b'\n').find_map(|r| {
+        let i = r.iter().position(|&c| c == b':')?;
+        (&r[..i] == t).then(|| &r[i + 1..])
+    })
 }
 
 fn compass8(rad: f32) -> &'static [u8] {
@@ -973,21 +1093,6 @@ fn fit_c(d: &mut dyn Draw, f: u8, y: i32, s: &[u8]) -> i32 {
         let w = d.width(f, &s[..n]);
         if box_ok(CX - w / 2, y, CX + (w + 1) / 2, y + h) {
             d.text(f, CX, y, 1, &s[..n]);
-            return w;
-        }
-        n -= 1;
-    }
-    0
-}
-
-/// Text left-aligned at x, top y, cut until it fits. Returns the width.
-fn fit_l(d: &mut dyn Draw, f: u8, x: i32, y: i32, s: &[u8]) -> i32 {
-    let (h, _) = d.metrics(f);
-    let mut n = s.len();
-    while n > 0 {
-        let w = d.width(f, &s[..n]);
-        if box_ok(x, y, x + w, y + h) {
-            d.text(f, x, y, 0, &s[..n]);
             return w;
         }
         n -= 1;
@@ -1137,10 +1242,8 @@ pub struct CardInfo<'a> {
     pub dist_m: f32,
     pub brg: f32,            // true bearing to it, rad
     pub heading: Option<f32>, // live compass heading, rad
-    pub index: usize,        // 0-based in the candidate list
-    pub count: usize,
-    pub in_cone: bool,
-    pub err: f32, // angular error at the aim, rad
+    pub route: Option<&'a Route>, // only one that fits where it is
+    pub flip: bool, // type and route share a line: show the type this time
 }
 
 #[inline(never)] // keeps the paint frame small (UI task stack)
@@ -1156,17 +1259,11 @@ pub fn paint_card(d: &mut dyn Draw, c: &CardInfo) {
     }
 
     // Layout for the measured window (on the watch: medium about 22 px a
-    // line, small 16): distance and speed top left, clear of the inset ring
-    // and the 12 o'clock marker; callsign, type and altitude in the middle;
-    // list position and match quality on the short bottom row. Every line is
-    // fitted (cut, never drawn outside) against the window.
+    // line, small 16): callsign, type and altitude in the middle, distance
+    // on the short bottom row. How well the aim matched needs no words: the
+    // rim marker shows it. Every line is fitted (cut, never drawn outside)
+    // against the window.
     let mut b = Buf::new();
-    let t0 = 20;
-    b.tenths(round(c.dist_m / M_PER_NM * 10.0)).t(b" nm");
-    fit_l(d, SMALL, 18, t0, b.s());
-    let sp = b.clear();
-    sp.int((a.gs as i32 + 5) / 10, false).t(b" kt");
-    fit_l(d, SMALL, 12, t0 + hs, sp.s());
 
     // callsign, else registration, else hex
     let id = b.clear();
@@ -1179,7 +1276,7 @@ pub fn paint_card(d: &mut dyn Draw, c: &CardInfo) {
             id.c(b"0123456789ABCDEF"[((a.hex >> sh) & 0xf) as usize]);
         }
     }
-    let y0 = (t0 + 2 * hs + 1).max(54); // 54: clear of the inset ring below the porthole
+    let y0 = 54; // clear of the inset ring below the porthole
     fit_c(d, MED, y0, id.s());
 
     // what it is
@@ -1189,7 +1286,7 @@ pub fn paint_card(d: &mut dyn Draw, c: &CardInfo) {
     if a.flags & F_MIL != 0 {
         rt.t(b" mil");
     }
-    fit_c(d, SMALL, y1, rt.s());
+    paint_type_route(d, y1, rt.s(), c.route, c.flip);
 
     // altitude with climb/descent mark
     let y2 = y1 + hs + 1;
@@ -1214,42 +1311,47 @@ pub fn paint_card(d: &mut dyn Draw, c: &CardInfo) {
         }
     }
 
-    // position in the list and how well it matched; the window is narrow
-    // down here, so the longest form that fits wins
+    // distance on the narrow bottom row, in tenths under 10 nm when they
+    // fit, else whole; EMERG instead for an emergency squawk
     let y3 = y2 + hs + 1;
-    let m = b.clear();
-    m.int(c.index as i32 + 1, false).c(b'/').int(c.count as i32, false).c(b' ');
-    let k = m.s().len();
-    if a.flags & F_EMERG != 0 {
-        m.t(b"EMERG");
-    } else if c.heading.is_none() || c.err < 0.0 {
-        m.t(b"nearest");
-    } else if c.in_cone {
-        m.t(b"match");
-    } else {
-        m.int(round(c.err / DEG), false).t("\u{b0} off".as_bytes());
-    }
-    let full = d.width(SMALL, m.s());
-    if box_ok(CX - full / 2, y3, CX + (full + 1) / 2, y3 + hs) {
-        d.text(SMALL, CX, y3, 1, m.s());
-    } else {
-        // the match word alone ("23 deg off" may lose " off"), else the
-        // position alone
-        let tail = &m.s()[k..];
-        let short = if tail.ends_with(b" off") { &tail[..tail.len() - 4] } else { tail };
-        let mut done = false;
-        for t in [tail, short] {
-            let wt = d.width(SMALL, t);
-            if box_ok(CX - wt / 2, y3, CX + (wt + 1) / 2, y3 + hs) {
-                d.text(SMALL, CX, y3, 1, t);
-                done = true;
-                break;
-            }
+    let nm = c.dist_m / M_PER_NM;
+    for whole in [false, true] {
+        let m = b.clear();
+        if a.flags & F_EMERG != 0 {
+            m.t(b"EMERG");
+        } else if !whole && nm < 9.95 {
+            m.tenths(round(nm * 10.0)).t(b" nm");
+        } else {
+            m.int(round(nm), false).t(b" nm");
         }
-        if !done {
-            fit_c(d, SMALL, y3, &m.s()[..k - 1]);
+        let w = d.width(SMALL, m.s());
+        if whole || box_ok(CX - w / 2, y3, CX + (w + 1) / 2, y3 + hs) {
+            fit_c(d, SMALL, y3, m.s());
+            break;
         }
     }
+}
+
+/// The type line. With a route ("LIS > JFK", a small plane for the arrow)
+/// the two take turns, `flip` picking the type; the line rarely fits both.
+#[inline(never)]
+fn paint_type_route(d: &mut dyn Draw, y: i32, typ: &[u8], route: Option<&Route>, flip: bool) {
+    if let Some(r) = route.filter(|_| !flip || typ.is_empty()) {
+        let (hs, asc) = d.metrics(SMALL);
+        let (f, t) = (&r.from[..flen(&r.from)], &r.to[..flen(&r.to)]);
+        const ICON: i32 = 9;
+        const GAP: i32 = 3;
+        let wf = d.width(SMALL, f);
+        let wr = wf + 2 * GAP + ICON + d.width(SMALL, t);
+        let x = CX - wr / 2;
+        if box_ok(x, y, x + wr, y + hs) {
+            d.text(SMALL, x, y, 0, f);
+            plane_icon(d, x + wf + GAP + ICON / 2, y + asc / 2 + 1, PI / 2.0, ICON as f32);
+            d.text(SMALL, x + wf + 2 * GAP + ICON, y, 0, t);
+            return;
+        }
+    }
+    fit_c(d, SMALL, y, typ);
 }
 
 // ---- aircraft kinds -------------------------------------------------------------
@@ -1270,36 +1372,28 @@ pub enum Kind {
     Unknown,
 }
 
-const HELI: &[&[u8]] = &[
-    b"B06", b"B06T", b"B407", b"B412", b"B429", b"B505", b"EC20", b"EC30", b"EC35", b"EC45", b"EC55", b"EC75",
-    b"AS32", b"AS50", b"AS55", b"AS65", b"R22", b"R44", b"R66", b"H60", b"H47", b"H64", b"H500", b"S76", b"S92",
-    b"A109", b"A119", b"A139", b"A169", b"BK17", b"MD52", b"MD60", b"UH1", b"V22",
-];
-const QUAD: &[&[u8]] = &[
-    b"B741", b"B742", b"B743", b"B744", b"B748", b"B74S", b"A388", b"A342", b"A343", b"A345", b"A346", b"C17",
-    b"K35R", b"C135", b"E3TF", b"C5M", b"B52", b"A400", b"C130", b"P3",
-];
-const HEAVY: &[&[u8]] = &[
-    b"A306", b"A310", b"A332", b"A333", b"A337", b"A338", b"A339", b"A359", b"A35K", b"B762", b"B763", b"B764",
-    b"B772", b"B77L", b"B77W", b"B778", b"B779", b"B788", b"B789", b"B78X", b"MD11", b"DC10", b"KC10", b"K46",
-];
+const HELI: &[u8] = b"\
+    B06 B06T B407 B412 B429 B505 EC20 EC30 EC35 EC45 EC55 EC75 AS32 AS50 AS55 AS65 R22 R44 R66 H60 \
+    H47 H64 H500 S76 S92 A109 A119 A139 A169 BK17 MD52 MD60 UH1 V22";
+const QUAD: &[u8] = b"\
+    B741 B742 B743 B744 B748 B74S A388 A342 A343 A345 A346 C17 K35R C135 E3TF C5M B52 A400 C130 P3";
+const HEAVY: &[u8] = b"\
+    A306 A310 A332 A333 A337 A338 A339 A359 A35K B762 B763 B764 B772 B77L B77W B778 B779 B788 B789 \
+    B78X MD11 DC10 KC10 K46";
 /// Prefixes for jets with engines on the tail.
-const BIZ: &[&[u8]] = &[
-    b"CRJ", b"E135", b"E145", b"E35L", b"E45X", b"C25", b"C50", b"C51", b"C52", b"C55", b"C56", b"C65", b"C68",
-    b"C700", b"C750", b"CL30", b"CL35", b"CL60", b"GLF", b"GL5", b"GL6", b"GL7", b"GLEX", b"LJ", b"E50P", b"E55P",
-    b"FA", b"F2TH", b"F900", b"H25", b"PC24", b"SF50", b"HDJT", b"BE40", b"PRM1", b"MD8", b"MD9", b"B712", b"DC9",
-];
-const JET: &[&[u8]] = &[
-    b"A31", b"A32", b"A19N", b"A20N", b"A21N", b"B73", b"B3", b"B75", b"E17", b"E19", b"E7", b"E29", b"BCS", b"A22",
-];
-const TWIN: &[&[u8]] = &[
-    b"DH8", b"AT4", b"AT7", b"B190", b"BE20", b"BE9", b"BE30", b"BE58", b"BE55", b"BE60", b"PA31", b"PA34",
-    b"PA44", b"PA23", b"C310", b"C340", b"C402", b"C414", b"C421", b"SW", b"SF34", b"DHC6", b"D228", b"L410",
-    b"P180", b"DA42", b"DA62", b"P68", b"JS3", b"E120",
-];
+const BIZ: &[u8] = b"\
+    CRJ E135 E145 E35L E45X C25 C50 C51 C52 C55 C56 C65 C68 C700 C750 CL30 CL35 CL60 GLF GL5 GL6 \
+    GL7 GLEX LJ E50P E55P FA F2TH F900 H25 PC24 SF50 HDJT BE40 PRM1 MD8 MD9 B712 DC9";
+const JET: &[u8] = b"\
+    A31 A32 A19N A20N A21N B73 B3 B75 E17 E19 E7 E29 BCS A22";
+const TWIN: &[u8] = b"\
+    DH8 AT4 AT7 B190 BE20 BE9 BE30 BE58 BE55 BE60 PA31 PA34 PA44 PA23 C310 C340 C402 C414 C421 SW \
+    SF34 DHC6 D228 L410 P180 DA42 DA62 P68 JS3 E120";
 
-fn has_prefix(t: &[u8], list: &[&[u8]], exact: bool) -> bool {
-    list.iter().any(|p| t.len() >= p.len() && &t[..p.len()] == *p && (!exact || t.len() == p.len()))
+/// `list` holds codes separated by spaces (packed: a slice per entry would
+/// cost 8 bytes of flash each).
+fn has_prefix(t: &[u8], list: &[u8], exact: bool) -> bool {
+    list.split(|&c| c == b' ').any(|p| !p.is_empty() && t.len() >= p.len() && &t[..p.len()] == p && (!exact || t.len() == p.len()))
 }
 
 /// Which silhouette: the type code when it is one we know, else the ADS-B
