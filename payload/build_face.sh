@@ -1,6 +1,6 @@
 #!/bin/sh
 # Offline build of the face loader (same toolchain and sysroot as build.sh).
-# Produces build/facehook.elf and build/facehook.bin (raw bytes for 0xf4200).
+# Produces build/facehook.elf and build/facehook.bin (raw bytes for 0xf41d0).
 set -e
 cd "$(dirname "$0")"
 RUST="${RUST_TOOLCHAIN:-1.98.1}"

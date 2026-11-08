@@ -49,5 +49,5 @@ Settings, goals, records, totals, activities and the `GARMIN/FACES` folder came 
 
 ## Reading the logs
 
-- `GARMIN/Debug/err_log.txt`: the last crash, with the code address. Addresses from `0xf4200` up are in the custom payloads.
+- `GARMIN/Debug/err_log.txt`: the last crash, with the code address. Addresses from `0xf41d0` up are in the custom payloads.
 - `GARMIN/EVNTLOGS/*.TXT`: install records. A successful install logs an update start, then a result of 1, then a restart.

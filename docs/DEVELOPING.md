@@ -23,7 +23,7 @@ The firmware has one free run of flash at `0xf41ca`..`0xfffff`. The build puts:
 
 | Payload | Address | Entry points |
 |---|---|---|
-| Faces, page hooks, plane finder | `0xf4200` | `face_entry`, `page_entry`, `tick_entry`, `page_flags_entry` |
+| Faces, page hooks, plane finder | `0xf41d0` | `face_entry`, `page_entry`, `tick_entry`, `page_flags_entry` |
 | Navigation | `0xfd700` (top 10.25 KB) | `nav_entry`, `tick_entry`, `vibe_entry`, `evt_entry`, `alert_entry` |
 
 Each hook overwrites the first instruction of a stock function (or one call or one constant) with a branch into a payload. Every hook, with the bytes it expects to find and the bytes it writes, is listed in `tools/build.sh` with a comment on what it does.
@@ -94,4 +94,4 @@ Rebuilds `media/*.gif` from the mocks and from faces in `faces/out` or `faces/ex
 3. You have Garmin's stock 19.10 file to hand and have read [RECOVERY.md](RECOVERY.md).
 4. Change one thing per flash. If the watch misbehaves, you'll know which change did it.
 
-After a crash, `GARMIN/Debug/err_log.txt` on the watch has the PC and a call stack. Addresses at `0xf4200` and up are in your payloads: look them up in `payload/build/facehook.elf` or `navhook.elf`.
+After a crash, `GARMIN/Debug/err_log.txt` on the watch has the PC and a call stack. Addresses at `0xf41d0` and up are in your payloads: look them up in `payload/build/facehook.elf` or `navhook.elf`.

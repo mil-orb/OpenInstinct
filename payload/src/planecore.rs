@@ -1070,6 +1070,13 @@ fn pointer(d: &mut dyn Draw, cx: i32, cy: i32, ang: f32, len: f32) {
     shape(d, true, cx, cy, ang, &[(0.0, -len), (0.4 * len, -0.15 * len), (0.13 * len, -0.25 * len), (0.13 * len, 0.45 * len), (-0.13 * len, 0.45 * len), (-0.13 * len, -0.25 * len), (-0.4 * len, -0.15 * len)]);
 }
 
+/// Height the fitting checks give a line's capitals, from its baseline up.
+/// The watch's medium font has about 11 px of capitals under 21 px of
+/// ascent, the small one about 9 under 14 (12 leaves a pixel spare). The
+/// font cell above them is empty, so it may reach into the margin around
+/// the inset ring.
+const CAPS: i32 = 12;
+
 /// `v / 2` for a size or width (never negative). A shift needs no sign
 /// fix-up, which saves 4 bytes of flash at every use.
 #[inline(always)]
@@ -1111,11 +1118,11 @@ fn fit_c(d: &mut dyn Draw, f: u8, y: i32, s: &[u8]) -> i32 {
 /// `fit_c`, drawn `bold` + 1 times a pixel apart (1: a bold weight from a
 /// regular font, one pixel wider).
 fn fit_x(d: &mut dyn Draw, f: u8, y: i32, s: &[u8], bold: i32) -> i32 {
-    let (h, _) = d.metrics(f);
+    let (h, a) = d.metrics(f);
     let mut n = s.len();
     while n > 0 {
         let w = d.width(f, &s[..n]) + bold;
-        if box_ok(CX - half(w), y, CX + half(w + 1), y + h) {
+        if box_ok(CX - half(w), y + a - CAPS, CX + half(w + 1), y + h) {
             for k in 0..=bold {
                 d.text(f, CX - half(bold) + k, y, 1, &s[..n]);
             }
@@ -1306,17 +1313,18 @@ pub fn paint_card(d: &mut dyn Draw, c: &CardInfo) {
             id.c(b"0123456789ABCDEF"[((a.hex >> sh) & 0xf) as usize]);
         }
     }
-    // as high as the inset ring lets this callsign sit (y 54 clears any)
+    // as high as the inset ring lets this callsign's capitals sit (a top
+    // of 63 clears any); the ring keeps 5 px off the porthole
     let w = d.width(MED, id.s()) + 1;
-    let mut y0 = 48;
-    while y0 < 54 && !box_ok(CX - half(w), y0, CX + half(w + 1), y0 + am) {
-        y0 += 1;
+    let mut t = 47; // top of the capitals
+    while t < 63 && !box_ok(CX - half(w), t, CX + half(w + 1), t + CAPS) {
+        t += 1;
     }
-    fit_x(d, MED, y0, id.s(), 1);
+    fit_x(d, MED, t + CAPS - am, id.s(), 1);
 
     // what it is: callsigns have no descenders, and the small font has
     // room above its capitals, so this line starts on the callsign baseline
-    let y1 = y0 + am - 1;
+    let y1 = t + CAPS - 1;
     let rt = b.clear();
     rt.t(type_name(&a.typ).unwrap_or(&a.typ[..flen(&a.typ)]));
     if a.flags & F_MIL != 0 {
