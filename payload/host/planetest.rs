@@ -41,17 +41,31 @@ impl Draw for Null {
 }
 
 /// Records text calls with font sizes like the watch's: cells (h, ascent)
-/// and a rough bold-sans advance per character.
+/// and a rough bold-sans advance per character. Texts keep their left edge,
+/// worked out from the alignment the way the firmware does; polygons and
+/// rectangles (as their corners) keep how many texts came before them.
 struct Lines {
     med: (i32, i32),
     small: (i32, i32),
     texts: Vec<(u8, i32, i32, Vec<u8>)>,
+    polys: Vec<(usize, Vec<i16>)>,
 }
 impl Draw for Lines {
-    fn rect(&mut self, _: bool, _: i32, _: i32, _: i32, _: i32) {}
-    fn poly(&mut self, _: bool, _: &[i16]) {}
-    fn text(&mut self, f: u8, x: i32, top: i32, _: u32, s: &[u8]) {
-        self.texts.push((f, x, top, s.to_vec()));
+    fn rect(&mut self, _: bool, x: i32, y: i32, w: i32, h: i32) {
+        let (x1, y1) = (x + w - 1, y + h - 1);
+        self.polys.push((self.texts.len(), [x, y, x1, y, x1, y1, x, y1].map(|v| v as i16).to_vec()));
+    }
+    fn poly(&mut self, _: bool, p: &[i16]) {
+        self.polys.push((self.texts.len(), p.to_vec()));
+    }
+    fn text(&mut self, f: u8, x: i32, top: i32, align: u32, s: &[u8]) {
+        let w = self.width(f, s);
+        let x0 = match align {
+            0 => x + 1 - w,
+            1 => x - w / 2,
+            _ => x,
+        };
+        self.texts.push((f, x0, top, s.to_vec()));
     }
     fn width(&mut self, f: u8, s: &[u8]) -> i32 {
         s.iter()
@@ -383,7 +397,7 @@ fn main() {
                     (None, b"route out of date", true, b"737 MAX 8"),
                     (Some(&route), b"", true, b"737 MAX 8"),
                 ] {
-                    let mut d = Lines { med, small, texts: vec![] };
+                    let mut d = Lines { med, small, texts: vec![], polys: vec![] };
                     paint_card(&mut d, &CardInfo { ac: &card, dist_m: dist_nm * M_PER_NM, brg: 0.0, heading: Some(0.0), route: rt, note, flip });
                     let t = &d.texts;
                     let tag = format!("med {med:?} small {small:?} {dist_nm} nm");
@@ -407,6 +421,40 @@ fn main() {
                     }
                 }
             }
+        }
+    }
+
+    // ---- route line: origin, a jet nose toward the destination, destination,
+    // centred as a whole (the firmware's align 0 ends text at x; drawing the
+    // cities with it put the line off to the left and the icon under "RNO")
+    for med in [(27, 21), (22, 17)] {
+        for small in [(16, 14), (15, 13), (14, 11), (18, 15), (16, 12)] {
+            let mut d = Lines { med, small, texts: vec![], polys: vec![] };
+            paint_card(&mut d, &CardInfo { ac: &card, dist_m: 4.4 * M_PER_NM, brg: 0.0, heading: Some(0.0), route: Some(&route), note: b"", flip: false });
+            let tag = format!("route med {med:?} small {small:?}");
+            let (wf, wt) = (d.width(SMALL, b"SFO"), d.width(SMALL, b"RNO"));
+            let from = d.texts.iter().position(|x| x.3 == b"SFO");
+            let to = d.texts.iter().position(|x| x.3 == b"RNO");
+            check!(from.is_some() && to == from.map(|i| i + 1), "{tag}: both cities, in order");
+            let (Some(i), Some(j)) = (from, to) else { continue };
+            let (f, t) = (&d.texts[i], &d.texts[j]);
+            check!(f.2 == t.2, "{tag}: cities on one line");
+            check!((f.1 + t.1 + wt - 2 * 64).abs() <= 1, "{tag}: line spans {}..{}, not centred on 64", f.1, t.1 + wt);
+            let icon: Vec<i16> = d.polys.iter().filter(|p| p.0 == i + 1).flat_map(|p| p.1.clone()).collect();
+            check!(!icon.is_empty(), "{tag}: no icon between the cities");
+            if icon.is_empty() {
+                continue;
+            }
+            let xs = || icon.iter().step_by(2).map(|&v| v as i32);
+            let ys = || icon.iter().skip(1).step_by(2).map(|&v| v as i32);
+            let (x0, x1) = (xs().min().unwrap(), xs().max().unwrap());
+            let (y0, y1) = (ys().min().unwrap(), ys().max().unwrap());
+            check!(x0 >= f.1 + wf + 1 && x1 <= t.1 - 2, "{tag}: icon {x0}..{x1} not clear of the cities ({}, {})", f.1 + wf, t.1);
+            check!(y0 >= f.2 && y1 <= f.2 + small.1, "{tag}: icon rows {y0}..{y1} outside the line {}..{}", f.2, f.2 + small.1);
+            check!(x1 - x0 >= y1 - y0, "{tag}: icon taller than long");
+            // the nose: the rightmost point sits on the icon's middle row
+            let nose = icon.chunks(2).filter(|p| p[0] as i32 == x1).map(|p| p[1] as i32).collect::<Vec<_>>();
+            check!(nose.iter().all(|&y| (2 * y - y0 - y1).abs() <= 2), "{tag}: nose at rows {nose:?}, icon {y0}..{y1}");
         }
     }
 

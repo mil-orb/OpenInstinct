@@ -76,7 +76,8 @@ def write_metrics(path):
 def draw_text(cv, fid, x, top, align, s):
     f = FONTS[fid]
     w = width(fid, s)
-    x0 = x - w // 2 if align == 1 else x
+    # the firmware's order: 0 ends at x, 1 centres, 2 starts at x
+    x0 = x + 1 - w if align == 0 else x - w // 2 if align == 1 else x
     h, a = metrics(f)
     im = Image.new("L", (w + 8, h + 4), 255)
     ImageDraw.Draw(im).text((2, 0), s, font=f, fill=0)

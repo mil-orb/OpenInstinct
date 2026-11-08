@@ -13,13 +13,16 @@
 
 pub const SMALL: u8 = 0;
 pub const MED: u8 = 1;
+/// Text alignment, in the firmware's order: 0 ends at x, 1 centres on x.
+pub const LEFT: u32 = 2;
 
 pub trait Draw {
     /// Filled rectangle; ink true = foreground.
     fn rect(&mut self, ink: bool, x: i32, y: i32, w: i32, h: i32);
     /// Filled polygon, (x, y) pairs in pixels.
     fn poly(&mut self, ink: bool, pts: &[i16]);
-    /// Text with its top row at `top`; align 1 centres on x, 0 starts at x.
+    /// Text with its top row at `top`; align 1 centres on x, `LEFT` (2)
+    /// starts at x, 0 ends at x.
     fn text(&mut self, font: u8, x: i32, top: i32, align: u32, s: &[u8]);
     fn width(&mut self, font: u8, s: &[u8]) -> i32;
     /// (cell height, ascent)
@@ -1037,7 +1040,7 @@ fn dots(d: &mut dyn Draw, cx: i32, cy: i32, r: f32, step_deg: i32, size: i32) {
         let t = a as f32 * DEG;
         let x = cx + round(r * sin(t));
         let y = cy - round(r * cos(t));
-        d.rect(true, x - size / 2, y - size / 2, size, size);
+        d.rect(true, x - half(size), y - half(size), size, size);
         a += step_deg;
     }
 }
@@ -1065,6 +1068,13 @@ pub fn plane_icon(d: &mut dyn Draw, cx: i32, cy: i32, ang: f32, len: f32) {
 /// Direction arrow from the centre outward.
 fn pointer(d: &mut dyn Draw, cx: i32, cy: i32, ang: f32, len: f32) {
     shape(d, true, cx, cy, ang, &[(0.0, -len), (0.4 * len, -0.15 * len), (0.13 * len, -0.25 * len), (0.13 * len, 0.45 * len), (-0.13 * len, 0.45 * len), (-0.13 * len, -0.25 * len), (-0.4 * len, -0.15 * len)]);
+}
+
+/// `v / 2` for a size or width (never negative). A shift needs no sign
+/// fix-up, which saves 4 bytes of flash at every use.
+#[inline(always)]
+fn half(v: i32) -> i32 {
+    v >> 1
 }
 
 fn text_c(d: &mut dyn Draw, f: u8, y: i32, s: &[u8]) {
@@ -1105,9 +1115,9 @@ fn fit_x(d: &mut dyn Draw, f: u8, y: i32, s: &[u8], bold: i32) -> i32 {
     let mut n = s.len();
     while n > 0 {
         let w = d.width(f, &s[..n]) + bold;
-        if box_ok(CX - w / 2, y, CX + (w + 1) / 2, y + h) {
+        if box_ok(CX - half(w), y, CX + half(w + 1), y + h) {
             for k in 0..=bold {
-                d.text(f, CX - bold / 2 + k, y, 1, &s[..n]);
+                d.text(f, CX - half(bold) + k, y, 1, &s[..n]);
             }
             return w;
         }
@@ -1154,7 +1164,7 @@ fn paint_inset(d: &mut dyn Draw, m: Inset) {
             Inset::Idle | Inset::Radar(_) => false,
         };
         let s = if lit { 5 } else { 2 };
-        d.rect(true, x - s / 2, y - s / 2, s, s);
+        d.rect(true, x - half(s), y - half(s), s, s);
     }
 }
 
@@ -1299,7 +1309,7 @@ pub fn paint_card(d: &mut dyn Draw, c: &CardInfo) {
     // as high as the inset ring lets this callsign sit (y 54 clears any)
     let w = d.width(MED, id.s()) + 1;
     let mut y0 = 48;
-    while y0 < 54 && !box_ok(CX - w / 2, y0, CX + (w + 1) / 2, y0 + am) {
+    while y0 < 54 && !box_ok(CX - half(w), y0, CX + half(w + 1), y0 + am) {
         y0 += 1;
     }
     fit_x(d, MED, y0, id.s(), 1);
@@ -1324,8 +1334,8 @@ pub fn paint_card(d: &mut dyn Draw, c: &CardInfo) {
     }
     let w = fit_c(d, SMALL, y2, al.s());
     if w > 0 && a.flags & F_RATE != 0 && a.rate.unsigned_abs() >= 300 {
-        let x = CX + w / 2 + 6;
-        let yc = y2 + hs / 2;
+        let x = CX + half(w) + 6;
+        let yc = y2 + half(hs);
         if box_ok(x - 4, yc - 4, x + 4, yc + 4) {
             let up = a.rate > 0;
             let pts: [i16; 6] = if up {
@@ -1358,39 +1368,51 @@ pub fn paint_card(d: &mut dyn Draw, c: &CardInfo) {
             m.t(b" nm");
         }
         let w = d.width(SMALL, m.s());
-        if k == 3 || box_ok(CX - w / 2, y3, CX + (w + 1) / 2, y3 + hs) {
+        if k == 3 || box_ok(CX - half(w), y3, CX + half(w + 1), y3 + hs) {
             fit_c(d, SMALL, y3, m.s());
             break;
         }
     }
 }
 
-/// The type line. With a route ("LIS > JFK", a small plane for the arrow)
-/// or a note on why there's none, the two take turns, `flip` picking the
-/// type; the line rarely fits both.
+/// ✈ pointing right, 12 x 10 px, between the cities on the route line: one
+/// row per entry, bit n is column n. A bitmap because a polygon this small
+/// loses its wings.
+const ROUTE_JET: [u16; 10] = [0x018, 0x030, 0x070, 0x0e1, 0xfff, 0xfff, 0x0e1, 0x070, 0x030, 0x018];
+
+/// The type line. With a route ("LIS ✈ JFK") or a note on why there's none,
+/// the two take turns, `flip` picking the type; the line rarely fits both.
 #[inline(never)]
 fn paint_type_route(d: &mut dyn Draw, y: i32, typ: &[u8], route: Option<&Route>, note: &[u8], flip: bool) {
-    let turn = !flip || typ.is_empty();
-    if turn && route.is_none() && !note.is_empty() {
-        fit_c(d, SMALL, y, note);
-        return;
-    }
-    if let Some(r) = route.filter(|_| turn) {
-        let (hs, asc) = d.metrics(SMALL);
-        let (f, t) = (&r.from[..flen(&r.from)], &r.to[..flen(&r.to)]);
-        const ICON: i32 = 9;
-        const GAP: i32 = 3;
-        let wf = d.width(SMALL, f);
-        let wr = wf + 2 * GAP + ICON + d.width(SMALL, t);
-        let x = CX - wr / 2;
-        if box_ok(x, y, x + wr, y + hs) {
-            d.text(SMALL, x, y, 0, f);
-            plane_icon(d, x + wf + GAP + ICON / 2, y + asc / 2 + 1, PI / 2.0, ICON as f32);
-            d.text(SMALL, x + wf + 2 * GAP + ICON, y, 0, t);
-            return;
+    let mut line = typ;
+    if !flip || typ.is_empty() {
+        if let Some(r) = route {
+            let (hs, asc) = d.metrics(SMALL);
+            let (f, t) = (&r.from[..flen(&r.from)], &r.to[..flen(&r.to)]);
+            const W: i32 = 12; // ROUTE_JET's width
+            const GAP: i32 = 3;
+            let wf = d.width(SMALL, f);
+            let wr = wf + 2 * GAP + W + d.width(SMALL, t);
+            let x = CX - half(wr);
+            if box_ok(x, y, x + wr, y + hs) {
+                d.text(SMALL, x, y, LEFT, f);
+                // bottom row on the baseline: it spans the capitals (about 10 px)
+                let (ix, iy) = (x + wf + GAP, y + asc - 10);
+                for (r, &bits) in ROUTE_JET.iter().enumerate() {
+                    for c in 0..W {
+                        if bits >> c & 1 != 0 {
+                            d.rect(true, ix + c, iy + r as i32, 1, 1);
+                        }
+                    }
+                }
+                d.text(SMALL, x + wf + 2 * GAP + W, y, LEFT, t);
+                return;
+            }
+        } else if !note.is_empty() {
+            line = note;
         }
     }
-    fit_c(d, SMALL, y, typ);
+    fit_c(d, SMALL, y, line);
 }
 
 // ---- aircraft kinds -------------------------------------------------------------
@@ -1601,8 +1623,8 @@ pub fn paint_map(d: &mut dyn Draw, blips: &[Blip], acs: &[Ac], heading: Option<f
     // north mark on the ring
     let nx = cx + round(r * sin(-h));
     let ny = cy - round(r * cos(-h));
-    d.rect(false, nx - 5, ny - hs / 2 - 1, 11, hs + 1);
-    d.text(SMALL, nx, ny - hs / 2, 1, b"N");
+    d.rect(false, nx - 5, ny - half(hs) - 1, 11, hs + 1);
+    d.text(SMALL, nx, ny - half(hs), 1, b"N");
     // you: a small dart facing 12 o'clock
     plane_icon(d, cx, cy, 0.0, 7.0);
     d.rect(true, cx - 1, cy - 1, 3, 3);
@@ -1655,7 +1677,7 @@ pub fn paint_map(d: &mut dyn Draw, blips: &[Blip], acs: &[Ac], heading: Option<f
                 // right of the glyph, else left, below, above; none if
                 // nothing fits the window (the card shows the callsign)
                 let w = d.width(SMALL, l.s());
-                let spots = [(px + 9, py - hs / 2), (px - 9 - w, py - hs / 2), (px - w / 2, py + 8), (px - w / 2, py - 8 - hs)];
+                let spots = [(px + 9, py - half(hs)), (px - 9 - w, py - half(hs)), (px - half(w), py + 8), (px - half(w), py - 8 - hs)];
                 let spot = spots.into_iter().find(|&(x, y)| box_ok(x - 1, y, x + w + 1, y + hs) && free(&taken[..nt], x - 1, y, w + 2, hs));
                 if let Some((lx, ly)) = spot {
                     sel_label = Some((lx, ly, l));
@@ -1692,7 +1714,7 @@ pub fn paint_map(d: &mut dyn Draw, blips: &[Blip], acs: &[Ac], heading: Option<f
         if fx * fx + fy * fy > (r + 2.0) * (r + 2.0) || ly + hs > cy + round(r) - hs / 2 || !free(&taken[..nt], lx, ly, w, hs - 2) {
             continue;
         }
-        d.text(SMALL, lx, ly, 0, l.s());
+        d.text(SMALL, lx, ly, LEFT, l.s());
         if nt < taken.len() {
             taken[nt] = (lx as i16, ly as i16, w as i16, (hs - 2) as i16);
             nt += 1;
@@ -1704,14 +1726,14 @@ pub fn paint_map(d: &mut dyn Draw, blips: &[Blip], acs: &[Ac], heading: Option<f
     if let Some((lx, ly, l)) = sel_label {
         let w = d.width(SMALL, l.s());
         d.rect(false, lx - 1, ly, w + 2, hs);
-        d.text(SMALL, lx, ly, 0, l.s());
+        d.text(SMALL, lx, ly, LEFT, l.s());
     }
 
     // range label under the ring
     let mut z = Buf::new();
     z.int(zoom_nm as i32, false).t(b" nm");
-    let y = cy + round(r) - hs / 2;
+    let y = cy + round(r) - half(hs);
     let w = d.width(SMALL, z.s());
-    d.rect(false, cx - w / 2 - 2, y, w + 4, hs);
+    d.rect(false, cx - half(w) - 2, y, w + 4, hs);
     d.text(SMALL, cx, y, 1, z.s());
 }
