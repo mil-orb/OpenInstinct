@@ -1,0 +1,13 @@
+# build output
+out/
+payload/build/
+payload/sysroot/
+faces/out/
+*.exe
+*.pdb
+__pycache__/
+*.pyc
+
+# never commit firmware
+*.GCD
+*.gcd
