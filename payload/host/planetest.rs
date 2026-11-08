@@ -40,6 +40,39 @@ impl Draw for Null {
     }
 }
 
+/// Records text calls with font sizes like the watch's: cells (h, ascent)
+/// and a rough bold-sans advance per character.
+struct Lines {
+    med: (i32, i32),
+    small: (i32, i32),
+    texts: Vec<(u8, i32, i32, Vec<u8>)>,
+}
+impl Draw for Lines {
+    fn rect(&mut self, _: bool, _: i32, _: i32, _: i32, _: i32) {}
+    fn poly(&mut self, _: bool, _: &[i16]) {}
+    fn text(&mut self, f: u8, x: i32, top: i32, _: u32, s: &[u8]) {
+        self.texts.push((f, x, top, s.to_vec()));
+    }
+    fn width(&mut self, f: u8, s: &[u8]) -> i32 {
+        s.iter()
+            .map(|&c| match (f == MED, c) {
+                (true, _) => 8,
+                (false, b'm' | b'M' | b'W') => 10,
+                (false, b' ' | b'.' | b',' | b'i' | b'l' | b'\'') => 3,
+                (false, b'0'..=b'9') => 7,
+                _ => 6,
+            })
+            .sum()
+    }
+    fn metrics(&mut self, f: u8) -> (i32, i32) {
+        if f == MED {
+            self.med
+        } else {
+            self.small
+        }
+    }
+}
+
 fn ac(lat: f64, lon: f64, alt: i32, trk: u16, gs: u16, name: &str) -> Ac {
     let mut a = Ac::ZERO;
     a.lat = (lat * 1e6) as i32;
@@ -229,14 +262,35 @@ fn main() {
     // ...but aimed at it, it still matches
     let (_, cone) = rank(&over[..1], &own, 0.0, Some(deg(0.0)), deg(3.0), &mut cands);
     check!(cone == 1, "overhead jet aimed at");
-    // size: a widebody at 12 nm against a light single at 5 nm on one line
+    // one line, a widebody at 12 nm and a light single at 5 nm: the nearer
     over[0] = ac(38.67, -9.14 + 12.0 / 60.0 / 0.7815, 33000, 0, 4800, "HEAVY");
     over[0].cat = 0xA5;
     over[1] = ac(38.67, -9.14 + 5.0 / 60.0 / 0.7815, 6000, 0, 1100, "LIGHT");
     over[1].cat = 0xA1;
-    let (n, cone) = rank(&over, &own, 0.0, Some(deg(90.0)), deg(3.0), &mut cands);
-    println!("size: {:?}", cands[..n].iter().map(|c| (nm(c, &over), c.score)).collect::<Vec<_>>());
-    check!(cone == 2 && nm(&cands[0], &over) == "HEAVY", "size-aware tiebreak");
+    let (_, cone) = rank(&over, &own, 0.0, Some(deg(90.0)), deg(3.0), &mut cands);
+    check!(cone == 2 && nm(&cands[0], &over) == "LIGHT", "nearer of two on one line");
+    // seen on the watch: a light plane 1 nm ahead at 1500 ft, coming over,
+    // and a jet at contrail height 20 nm away at 10 o'clock. Aimed at the
+    // light plane, it must win even with the compass 40 deg off toward the
+    // jet; aimed at the jet, the jet.
+    let (jn, je) = (20.0 * 0.5, -20.0 * 0.866); // bearing 300
+    let pair = [
+        ac(38.67 + 1.0 / 60.0, -9.14, 1500, 1800, 1200, "CLOSE"),
+        ac(38.67 + jn / 60.0, -9.14 + je / 60.0 / 0.7815, 35000, 900, 4500, "JET"),
+    ];
+    for off in [-20, -10, 0, 10, 20, 30, 40] {
+        let (n, _) = rank(&pair, &own, 0.0, Some(deg(-off as f32)), deg(3.0), &mut cands);
+        check!(n >= 1 && nm(&cands[0], &pair) == "CLOSE", "aimed at CLOSE, compass {off} deg toward JET: {}", nm(&cands[0], &pair));
+    }
+    for aim in [-50.0, -60.0, -70.0] {
+        let (n, _) = rank(&pair, &own, 0.0, Some(deg(aim)), deg(3.0), &mut cands);
+        check!(n >= 1 && nm(&cands[0], &pair) == "JET", "aimed at JET ({aim}): {}", nm(&cands[0], &pair));
+    }
+    // ln against the host's
+    for i in 0..2000 {
+        let x = 0.01 + i as f32 * 0.37;
+        check!((ln(x) - x.ln()).abs() < 2e-4, "ln({x}) {} vs {}", ln(x), x.ln());
+    }
     // no compass: by distance over visibility
     let (n, cone) = rank(&list, &own, 0.0, None, 0.0, &mut cands);
     check!(n >= 3 && cone == 0, "no compass ranking");
@@ -300,9 +354,9 @@ fn main() {
     weird.rate = -32000;
     weird.flags |= F_RATE | F_EMERG | F_MIL;
     for h in [None, Some(0.0), Some(3.0)] {
-        paint_card(&mut d, &CardInfo { ac: &weird, dist_m: 1e9, brg: 1.0, heading: h, route: None, flip: false });
+        paint_card(&mut d, &CardInfo { ac: &weird, dist_m: 1e9, brg: 1.0, heading: h, route: None, note: b"route: no reply", flip: false });
         let long = Route { from: *b"WWWW", to: *b"MMMM", pos: [0; 4] };
-        paint_card(&mut d, &CardInfo { ac: &weird, dist_m: 1e9, brg: 1.0, heading: h, route: Some(&long), flip: h.is_some() });
+        paint_card(&mut d, &CardInfo { ac: &weird, dist_m: 1e9, brg: 1.0, heading: h, route: Some(&long), note: b"", flip: h.is_some() });
     }
     let blips: Vec<Blip> = (0..40)
         .map(|i| Blip { e: (i as f32 - 20.0) * 2000.0, n: (i % 7) as f32 * 3000.0 - 9000.0, track: i as f32, has_track: i % 2 == 0, alt: i * 1000, sel: i == 3, idx: (i % 6) as u8 })
@@ -312,6 +366,49 @@ fn main() {
         paint_map(&mut d, &blips, &list, None, z);
     }
     check!(d.oob == 0, "{} draw calls off screen", d.oob);
+
+    // ---- card with the watch's font sizes (a photo puts the medium cell near
+    // 27 px with 21 px ascent, the small near 16/14) and a range around them
+    let mut card = ac(38.7, -9.09, 35000, 900, 4500, "UAL1234");
+    card.typ = *b"B38M";
+    card.rate = 1500;
+    card.flags |= F_RATE;
+    let route = Route { from: *b"SFO\0", to: *b"RNO\0", pos: [0; 4] };
+    for med in [(27, 21), (26, 20), (28, 22), (22, 17), (24, 19), (20, 16), (21, 17), (19, 15)] {
+        for small in [(16, 14), (15, 13), (16, 12), (18, 15), (14, 11), (17, 14)] {
+            for (dist_nm, want) in [(14.4f32, &b"450 kt  14 nm"[..]), (4.4, b"450 kt  4.4 nm"), (0.6, b"450 kt  0.6 nm")] {
+                for (rt, note, flip, line) in [
+                    (None, &b""[..], false, &b"737 MAX 8"[..]),
+                    (None, b"route out of date", false, b"route out of date"),
+                    (None, b"route out of date", true, b"737 MAX 8"),
+                    (Some(&route), b"", true, b"737 MAX 8"),
+                ] {
+                    let mut d = Lines { med, small, texts: vec![] };
+                    paint_card(&mut d, &CardInfo { ac: &card, dist_m: dist_nm * M_PER_NM, brg: 0.0, heading: Some(0.0), route: rt, note, flip });
+                    let t = &d.texts;
+                    let tag = format!("med {med:?} small {small:?} {dist_nm} nm");
+                    let calls: Vec<_> = t.iter().filter(|x| x.3 == b"UAL1234").collect();
+                    check!(calls.len() == 2 && calls[1].1 == calls[0].1 + 1, "{tag}: callsign whole and bold");
+                    let smalls: Vec<_> = t.iter().filter(|x| x.0 == SMALL).collect();
+                    check!(smalls.len() == 3, "{tag}: three small lines, got {}", smalls.len());
+                    if smalls.len() == 3 {
+                        check!(smalls[0].3 == line, "{tag}: type line {:?}", String::from_utf8_lossy(&smalls[0].3));
+                        let last = smalls[2];
+                        check!(last.3.ends_with(b" nm"), "{tag}: bottom row {:?}", String::from_utf8_lossy(&last.3));
+                        // the bottom row's letters end at least 3 px above the screen edge
+                        check!(last.2 + small.1 <= 125, "{tag}: bottom row ink at {}", last.2 + small.1);
+                        // each line starts below the one above's baseline
+                        check!(smalls[0].2 >= calls[0].2 + med.1 - 1, "{tag}: type line under the callsign");
+                        check!(smalls[1].2 >= smalls[0].2 + small.0 && smalls[2].2 >= smalls[1].2 + small.0, "{tag}: lines overlap");
+                        // at the watch's own sizes, speed and distance share the row
+                        if med == (27, 21) && small == (16, 14) {
+                            check!(last.3 == want, "{tag}: bottom row {:?}", String::from_utf8_lossy(&last.3));
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     if fails == 0 {
         println!("all plane tests passed");

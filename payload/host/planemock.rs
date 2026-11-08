@@ -78,9 +78,9 @@ fn main() {
     println!("CASE status_aim");
     paint_status(&mut r, b"Hold steady", b"let go of BACK", b"to look up", Inset::Lock(7), Some(1));
     println!("CASE status_wait");
-    paint_status(&mut r, b"Searching", b"ADS-B via phone", b"4 s", Inset::Radar(1), Some(0));
+    paint_status(&mut r, b"Searching", b"phone position", b"4 s", Inset::Radar(1), Some(0));
     for (i, (t1, l1, l2)) in [
-        (&b"No position"[..], &b"wait for GPS,"[..], &b"hold BACK"[..]),
+        (&b"No position"[..], &b"phone location"[..], &b"or a GPS fix"[..]),
         (b"No phone", b"connect phone,", b"hold BACK"),
         (b"No internet", b"Gadgetbridge:", b"turn it on"),
         (b"Server error", b"HTTP 503", b"hold BACK"),
@@ -93,7 +93,7 @@ fn main() {
         paint_status(&mut r, t1, l1, l2, Inset::Idle, if i == 7 { Some(2) } else { None });
     }
     println!("CASE radar_4");
-    paint_status(&mut r, b"Searching", b"ADS-B via phone", b"9 s", Inset::Radar(4), Some(2));
+    paint_status(&mut r, b"Searching", b"phone position", b"9 s", Inset::Radar(4), Some(2));
     println!("CASE status_nofirewall");
     paint_status(&mut r, b"No reply", b"Gadgetbridge:", b"api.adsb.lol", Inset::Idle, None);
 
@@ -114,6 +114,7 @@ fn main() {
                 brg: atan2(e, nn),
                 heading: live.map(|d| d * DEG),
                 route: route_for(a).as_ref(),
+                note: b"",
                 flip: false,
             },
         );
@@ -164,7 +165,7 @@ fn main() {
     for p in 0..8u8 {
         frame(&mut r, "search");
         let secs = format!("{} s", p / 2 + 1);
-        paint_status(&mut r, b"Searching", b"ADS-B via phone", secs.as_bytes(), Inset::Radar(p), Some(p));
+        paint_status(&mut r, b"Searching", b"phone position", secs.as_bytes(), Inset::Radar(p), Some(p));
     }
     for (what, sel_off) in [("card", 0usize), ("next", 1)] {
         let (cn, _) = rank(acs, &own, 0.0, Some(2.0 * DEG), 2.0 * DEG, &mut cands);
@@ -173,7 +174,7 @@ fn main() {
         let (e, nn) = enu(&own, a, 0.0);
         frame(&mut r, what);
         paint_card(&mut r, &CardInfo { ac: a, dist_m: sqrt(e * e + nn * nn), brg: atan2(e, nn), heading: Some(4.0 * DEG),
-            route: route_for(a).as_ref(), flip: false });
+            route: route_for(a).as_ref(), note: b"", flip: false });
     }
     frame(&mut r, "map");
     paint_map(&mut r, &blips, acs, Some(4.0 * DEG), 25);

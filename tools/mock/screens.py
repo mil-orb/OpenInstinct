@@ -6,8 +6,10 @@ watch runs (payload/src/navcore.rs, planecore.rs) compiled for your PC.
 The host programs payload/host/navmock.rs and planemock.rs print drawing calls
 (R rect, P polygon, T text); this script renders them with facekit's canvas.
 Fonts are stand-ins for the watch's own (which load at run time): a bold sans
-thresholded to 1 bit, sized close to what the watch shows (about 15 px small,
-21 px medium). Set MOCK_FONT to a .ttf path to use another font, and
+thresholded to 1 bit, sized to match text widths in a photo of the watch. The
+layout gets the cell sizes the watch's fonts report as measured from that
+photo (small 16 px with 14 px ascent, medium 27 with 21), and each glyph sits
+on the baseline the watch would use. Set MOCK_FONT to a .ttf path to use another font, and
 HOST_TOOLCHAIN (for example "stable-x86_64-pc-windows-gnu") if your default
 Rust toolchain can't link host programs.
 """
@@ -25,8 +27,9 @@ OUT = ROOT / "out" / "mock"
 REPLY = Path(__file__).resolve().parent / "sample_reply.json"
 EXE = ".exe" if os.name == "nt" else ""
 
-# (PIL size) per font id: 0 SMALL, 1 MED
-SIZES = {0: 14, 1: 20}
+# per font id (0 SMALL, 1 MED): PIL size, and the watch's (cell height, ascent)
+SIZES = {0: 12, 1: 13}
+CELLS = {0: (16, 14), 1: (27, 21)}
 FONT_CANDIDATES = [
     os.environ.get("MOCK_FONT", ""),
     "C:/Windows/Fonts/arialbd.ttf",
@@ -63,7 +66,7 @@ def width(fid, s):
 def write_metrics(path):
     lines = []
     for fid, f in FONTS.items():
-        h, a = metrics(f)
+        h, a = CELLS[fid]
         lines.append(f"M {fid} {h} {a}")
         for cp in list(range(32, 127)) + list(range(160, 256)):
             lines.append(f"W {fid} {cp} {adv64(f, chr(cp))}")
@@ -74,14 +77,16 @@ def draw_text(cv, fid, x, top, align, s):
     f = FONTS[fid]
     w = width(fid, s)
     x0 = x - w // 2 if align == 1 else x
-    h, _ = metrics(f)
+    h, a = metrics(f)
     im = Image.new("L", (w + 8, h + 4), 255)
     ImageDraw.Draw(im).text((2, 0), s, font=f, fill=0)
     p = im.load()
+    # baseline on the watch's: its glyphs end at cell row ascent - 1
+    dy = top + CELLS[fid][1] - a
     for yy in range(im.height):
         for xx in range(im.width):
             if p[xx, yy] < 128:
-                X, Y = x0 + xx - 2, top + yy
+                X, Y = x0 + xx - 2, dy + yy
                 if 0 <= X < 128 and 0 <= Y < 128:
                     cv.px[Y][X] = 1
 

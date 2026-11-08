@@ -28,7 +28,7 @@ The firmware has one free run of flash at `0xf41ca`..`0xfffff`. The build puts:
 
 Each hook overwrites the first instruction of a stock function (or one call or one constant) with a branch into a payload. Every hook, with the bytes it expects to find and the bytes it writes, is listed in `tools/build.sh` with a comment on what it does.
 
-The faces payload grows upward toward the nav payload. The build prints how much room is left ("free after faces"). It's about 0.6 KB now, which is the main limit on new features.
+The faces payload grows upward toward the nav payload. The build prints how much room is left ("free after faces"). It's under 0.1 KB now, which is the main limit on new features.
 
 ## Toolchain
 

@@ -10,7 +10,7 @@ Custom watch faces and custom apps for the **original Garmin Instinct (2018)**, 
 
 - **Custom watch faces.** A face is one small file you drag onto the watch over USB. Faces can show the time, date, heart rate, steps, battery, sunrise and sunset, plus weather and the song playing on your phone. 7 faces come prebuilt, the source of 24 is included, and there's a Python kit for making your own with a live preview.
 - **A framework for custom apps.** Apps are small Rust programs that open their own pages in the watch's UI, read the buttons, compass and GPS, draw with the watch's own fonts, and reach the internet through your phone.
-- **Plane finder** is the worked example app. On the watch face, hold BACK, point 12 o'clock at a plane in the sky and let go. A few seconds later you get its callsign, aircraft type, altitude, speed and distance, with a map of all the traffic around you.
+- **Plane finder** is the worked example app. On the watch face, hold BACK, point 12 o'clock at a plane in the sky and let go. A few seconds later you get its callsign, aircraft type (and route, for airline flights), altitude, speed and distance, with a map of all the traffic around you.
 - **Turn-by-turn navigation** from Google Maps on your phone, drawn as a native screen with arrows and distances.
 
 <p align="center">
@@ -71,7 +71,7 @@ The watch's own face settings, including the inset in the top-right porthole, st
 
 ### Plane finder
 
-1. Get a GPS fix once (start any GPS activity until it locks). The watch remembers its last position.
+1. In Gadgetbridge, turn on Settings, Location, **Keep location updated**, and give Gadgetbridge location permission. Each aim asks the phone where you are. Without it, the watch's last GPS fix is used, which is only as fresh as your last GPS activity.
 2. In Gadgetbridge, turn on internet access for the watch and allow `api.adsb.lol` and `api.adsbdb.com`.
 3. On the watch face, **hold BACK**. Point 12 o'clock at the plane, hold steady while the ring fills, then **let go**.
 
@@ -82,11 +82,13 @@ The watch's own face settings, including the inset in the top-right porthole, st
 | Hold BACK | Aim again | Aim again |
 | BACK | Close | Back to the card |
 
-It searches 25 nm around you and picks the plane nearest your aim. Of two planes along the same line, it picks the nearer one, and a plane right overhead still counts. In a busy sky it searches again at 10 nm when the 25 nm reply is too big.
+It searches 25 nm around you and picks the plane nearest your aim, leaning hard toward closer planes. The compass gives a direction but not how high you're pointing, so a plane a mile away near your aim beats a jet at contrail height 20 miles off, even when the compass is up to 40° off. A plane right overhead still counts. In a busy sky it searches again at 10 nm when the 25 nm reply is too big.
 
-The card shows the callsign, the type, the altitude with a climb or descent arrow, and how far away it is. The small plane on the rim is where it sits from 12 o'clock: under the notch means you're on it, and the dotted trail shows which way to turn. If the compass can't help, the card shows a direction (N, SE...) at the top instead.
+While it searches, the screen says which position it's using: "phone position" (a fix from the last 30 minutes, good to 1 km) or "watch GPS fix". An old position throws off the bearing to nearby planes, so if it says "watch GPS fix", check the Gadgetbridge setting above. If it keeps picking the wrong plane, calibrate the compass (watch settings, Sensors, Compass).
 
-For airline flights the card swaps between the type and the route (LIS ▸ OPO) every 3 seconds. That costs one small request per flight you look at, and a route that doesn't fit where the plane actually is gets dropped (callsigns get reused). Aircraft data comes from [adsb.lol](https://adsb.lol), a community ADS-B network, and routes from [adsbdb](https://www.adsbdb.com).
+The card shows the callsign in bold, the type, the altitude with a climb or descent arrow, and the speed and distance on the bottom row (the speed drops off when the row is too narrow for both). The small plane on the rim is where it sits from 12 o'clock: under the notch means you're on it, and the dotted trail shows which way to turn. If the compass can't help, the card shows a direction (N, SE...) at the top instead.
+
+For airline flights the card swaps between the type and the route (LIS ▸ OPO) every 3 seconds. That costs one small request per flight you look at, and a route that doesn't fit where the plane actually is gets dropped (callsigns get reused). When there's no route, the type swaps with the reason instead: "route unknown" (adsbdb has no route for that callsign), "route out of date" (it has one, but the plane isn't on it, often another leg of the same flight number) or "route: no reply" (nothing came back; check that `api.adsbdb.com` is allowed in Gadgetbridge). Private flights flying under their registration (N123AB) never get a route. Aircraft data comes from [adsb.lol](https://adsb.lol), a community ADS-B network, and routes from [adsbdb](https://www.adsbdb.com).
 
 Trade-off: after this install, a quick BACK press on the face fires when you let go instead of when you press. That's how the watch tells a press from a hold. To turn the plane finder off, put a file named `PLANEOFF` in `GARMIN/FACES`.
 

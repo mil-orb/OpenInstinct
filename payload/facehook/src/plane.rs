@@ -82,6 +82,16 @@ const COMPASS_GET: usize = 0x000e_cd0c; // (&f32 rad, true north by default) -> 
 const COMPASS_REL: usize = 0x000e_ce8c; // (slot)
 const POSITION: usize = 0x000d_39f0; // (&pos, 1): last known, semicircles
 const PHONE: usize = 0x000a_ee78; // () -> phone connected
+/// Asks the phone where it is (FUN_000c9534, which the altimeter auto-cal
+/// sends on connect, at most daily): a protobuf GetLocationRequest.
+/// Gadgetbridge answers with Android's last known fix and FUN_000c9274
+/// stores it for PHONE_POS.
+const LOC_ASK: usize = 0x000c_9534; // ()
+/// Protobuf link handle, 0xffff with none; the firmware's own caller checks
+/// it before LOC_ASK (0xc957e).
+const PB_LINK: usize = 0x2002_2678;
+const PHONE_POS: usize = 0x000d_36d4; // (&PhonePos): copy of the last phone fix
+const GARMIN_NOW: usize = 0x000e_e9e0; // (&u32): Garmin time, s
 const HTTP_INIT: usize = 0x1017_bfd0; // (req[0x80]): zero + defaults, GET
 const HTTP_SEND: usize = 0x101a_fc24; // (req) -> request id, -1 when no phone HTTP
 const REQ_URL: usize = 0x04;
@@ -105,6 +115,12 @@ const LOOKUP_NM: u32 = 25;
 /// Busy sky near a hub: when the 25 nm reply fails or can't be read, one
 /// retry at this radius (about a sixth of the area)
 const RETRY_NM: u32 = 10;
+/// The phone's fix beats the watch's last one (often from the last activity,
+/// hours or days back) when it is at most this old, s, and this good, m.
+const PHONE_AGE_S: i32 = 1800;
+const PHONE_ACC_M: f32 = 1000.0;
+/// Ask the phone again at most this often, ms
+const LOC_EVERY: u32 = 30_000;
 
 // screens
 const S_AIM: u8 = 0;
@@ -128,6 +144,7 @@ const F_LIVE: u8 = 8;
 const F_DIRTY: u8 = 16; // repaint at the next tick
 const F_HELD: u8 = 32; // BACK held: aiming, sampling the compass
 const F_SEEN: u8 = 64; // BACK_HELD was seen set during this hold
+const F_PHONE_POS: u8 = 128; // st.own is the phone's fix
 
 // ---- shared request block -------------------------------------------------------
 const NET_MAGIC: u32 = 0x504c_4e31; // "PLN1"
@@ -255,6 +272,7 @@ struct St {
     t_data: u32,
     t_paint: u32,
     t_aim: u32,
+    t_loc: u32, // last LOC_ASK
     smp: [f32; NSMP],
     smp_t: [u32; NSMP],
     ns: u32,
@@ -272,7 +290,6 @@ struct St {
     sel: u8,
     n_ac: u8,
     n_cand: u8,
-    n_cone: u8,
     flags: u8,
     phase: u8,
     pending_lookup: u8,
@@ -293,8 +310,10 @@ struct St {
 const SCRATCH: usize = 160;
 
 const ROUTES: usize = 6;
-const R_NONE: u8 = 0; // asked, nothing usable (unknown, stale, failed)
+const R_NONE: u8 = 0; // adsbdb doesn't know the callsign
 const R_OK: u8 = 1;
+const R_FAR: u8 = 2; // known, but the aircraft isn't on it (another leg, or stale)
+const R_ERR: u8 = 3; // no answer: phone, firewall, timeout or an HTTP error
 
 #[derive(Clone, Copy)]
 #[repr(C)]
@@ -323,14 +342,18 @@ unsafe fn route_tick(st: &mut St, a: &Ac) -> bool {
         let s = rt.state.load(Ordering::Acquire);
         let late = s == N_PENDING && t.wrapping_sub(st.t_rt) > LOOKUP_TIMEOUT;
         if s == N_DONE || late {
-            let mut seen = Seen { hex: rt.hex, got: R_NONE, _pad: [0; 3], route: rt.route };
-            if s == N_DONE && rt.got != 0 && rt.code >= 200 && rt.code < 300 {
+            let mut seen = Seen { hex: rt.hex, got: R_ERR, _pad: [0; 3], route: rt.route };
+            let ok = s == N_DONE && rt.code >= 200 && rt.code < 300;
+            if ok && rt.got != 0 {
                 // judged against where the aircraft is now
+                seen.got = R_FAR;
                 if let Some(p) = st.ac[..st.n_ac as usize].iter().find(|p| p.hex == rt.hex) {
                     if route_fits(&rt.route, p.lat, p.lon) {
                         seen.got = R_OK;
                     }
                 }
+            } else if ok || s == N_DONE && rt.code == 404 {
+                seen.got = R_NONE;
             }
             let k = st.rt_next as usize % ROUTES;
             st.routes[k] = seen;
@@ -586,9 +609,8 @@ fn rerank(st: &mut St) {
     let dt = since_data(st, st.t_aim);
     let head = if st.flags & F_HEAD != 0 { Some(st.head) } else { None };
     let n = (st.n_ac as usize).min(MAX_AC);
-    let (c, cone) = rank(&st.ac[..n], &st.own, dt, head, st.spread, &mut st.cand);
+    let (c, _) = rank(&st.ac[..n], &st.own, dt, head, st.spread, &mut st.cand);
     st.n_cand = c as u8;
-    st.n_cone = cone as u8;
     st.sel = 0;
     if st.sel_hex != 0 {
         for (i, k) in st.cand[..c].iter().enumerate() {
@@ -623,6 +645,8 @@ unsafe fn begin_aim(st: &mut St) {
     if st.slot < 0 {
         st.slot = f1::<u32, i32>(COMPASS_REG)(120);
     }
+    // the reply lands in a second or so, well before the release
+    ask_phone_pos(st);
 }
 
 /// BACK let go. Straight after the screen opened it only waits (the user
@@ -691,16 +715,61 @@ fn fail(st: &mut St, e: u8) {
     }
 }
 
-/// Last known position into st.own. False when there is none.
+/// The phone's last fix as the firmware keeps it (0x20017a5c, filled by
+/// FUN_000c9274 from GetLocationResponse.location_data).
+#[repr(C)]
+struct PhonePos {
+    lat: i32, // semicircles
+    lon: i32,
+    alt: f32,
+    time: u32, // Garmin time of the fix, s
+    acc: f32,  // horizontal, m; -1 when not sent
+    vacc: f32,
+    valid: u8, // 1 when the reply had a timestamp
+    _pad: [u8; 3],
+}
+// FUN_000d36d4 copies exactly 0x1c bytes
+const _: () = assert!(size_of::<PhonePos>() == 0x1c);
+
+fn semi_ok(lat: i32, lon: i32) -> bool {
+    lat != 0x7fff_ffff && lon != 0x7fff_ffff && !(lat == 0 && lon == 0) && lat.unsigned_abs() <= 0x4000_0000
+}
+
+/// Ask the phone where it is, at most every LOC_EVERY. One small BLE
+/// message; the phone answers from Android's cache without starting its GPS.
+unsafe fn ask_phone_pos(st: &mut St) {
+    let t = now();
+    if (st.t_loc != 0 && t.wrapping_sub(st.t_loc) < LOC_EVERY) || f0::<u8>(PHONE)() == 0 || *(PB_LINK as *const u16) == 0xffff {
+        return;
+    }
+    st.t_loc = t | 1;
+    f0::<()>(LOC_ASK)();
+}
+
+/// Where the user is, into st.own: the phone's fix when it is recent and
+/// good enough, else the watch's last GPS fix. False when there is neither.
 unsafe fn read_pos(st: &mut St) -> bool {
+    let mut p: PhonePos = core::mem::zeroed();
+    f1::<*mut PhonePos, ()>(PHONE_POS)(&mut p);
+    let mut t = 0u32;
+    f1::<*mut u32, ()>(GARMIN_NOW)(&mut t);
+    // a static location from Gadgetbridge's settings has no real fix time,
+    // so it fails the age test
+    let age = t.wrapping_sub(p.time) as i32;
+    if p.valid == 1 && (-60..=PHONE_AGE_S).contains(&age) && p.acc >= 0.0 && p.acc <= PHONE_ACC_M && semi_ok(p.lat, p.lon) {
+        st.own = Own::from_semi(p.lat, p.lon);
+        st.own.unc = p.acc;
+        st.flags |= F_PHONE_POS;
+        return true;
+    }
     let mut pos = [0i32; 4];
     f2::<*mut i32, u32, i32>(POSITION)(pos.as_mut_ptr(), 1);
-    let (lat, lon) = (pos[0], pos[1]);
-    let valid = lat != 0x7fff_ffff && lon != 0x7fff_ffff && !(lat == 0 && lon == 0) && lat.unsigned_abs() <= 0x4000_0000;
-    if valid {
-        st.own = Own::from_semi(lat, lon);
+    if !semi_ok(pos[0], pos[1]) {
+        return false;
     }
-    valid
+    st.own = Own::from_semi(pos[0], pos[1]);
+    st.flags &= !F_PHONE_POS;
+    true
 }
 
 // separate frames: only one handler's locals are on the stack at a time
@@ -735,11 +804,10 @@ unsafe fn create() {
     st.zoom = 1;
     st.slot = f1::<u32, i32>(COMPASS_REG)(120);
 
-    let valid = read_pos(st);
     f2::<usize, u32, ()>(PAGE_TIMER)(n, TICK_MS_PAGE);
-    if !valid {
-        fail(st, E_POS);
-    } else if f0::<u8>(PHONE)() == 0 {
+    // no position yet is fine: the aim asks the phone for one, and the
+    // release checks
+    if f0::<u8>(PHONE)() == 0 {
         fail(st, E_PHONE);
     } else {
         begin_aim(st);
@@ -766,6 +834,8 @@ unsafe fn destroy() {
 /// After the aim window and the reply are both in: rank and show.
 fn finish_lookup(st: &mut St) {
     st.pending_lookup = 0;
+    // a phone fix that came in after the release still counts for ranking
+    unsafe { read_pos(st) };
     rerank(st);
     if st.n_ac == 0 || !st.ac[..st.n_ac as usize].iter().any(|a| a.airborne()) {
         fail(st, E_EMPTY);
@@ -1088,7 +1158,8 @@ unsafe fn paint() {
             } else {
                 let mut b = Buf::new();
                 b.int((t.wrapping_sub(st.t_fetch) / 1000) as i32, false).t(b" s");
-                paint_status(&mut g, b"Searching", b"ADS-B via phone", b.s(), Inset::Radar((t.wrapping_sub(st.t_fetch) / 1000) as u8), Some((t.wrapping_sub(st.t_fetch) / 1000) as u8));
+                let from: &[u8] = if st.flags & F_PHONE_POS != 0 { b"phone position" } else { b"watch GPS fix" };
+                paint_status(&mut g, b"Searching", from, b.s(), Inset::Radar((t.wrapping_sub(st.t_fetch) / 1000) as u8), Some((t.wrapping_sub(st.t_fetch) / 1000) as u8));
             }
         }
         S_CARD => {
@@ -1108,6 +1179,12 @@ unsafe fn paint() {
                     brg: atan2(e, nn),
                     heading: live,
                     route: route_of(st, a.hex).filter(|s| s.got == R_OK).map(|s| &s.route),
+                    note: match route_of(st, a.hex).map(|s| s.got) {
+                        Some(R_NONE) => &b"route unknown"[..],
+                        Some(R_FAR) => b"route out of date",
+                        Some(R_ERR) => b"route: no reply",
+                        _ => b"",
+                    },
                     flip: (t / 3000) & 1 != 0,
                 },
             );
@@ -1148,7 +1225,7 @@ unsafe fn paint() {
         _ => {
             let mut code = Buf::new();
             let (t1, l1, l2): (&[u8], &[u8], &[u8]) = match st.err {
-                E_POS => (b"No position", b"wait for GPS,", b"hold BACK"),
+                E_POS => (b"No position", b"phone location", b"or a GPS fix"),
                 E_PHONE => (b"No phone", b"connect phone,", b"hold BACK"),
                 E_HTTP => (b"No internet", b"Gadgetbridge:", b"turn it on"),
                 E_TIMEOUT => (b"No reply", b"Gadgetbridge:", b"api.adsb.lol"),

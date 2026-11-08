@@ -574,11 +574,14 @@ pub struct Own {
     pub lat: i32,
     pub lon: i32,
     pub coslat: f32,
+    /// How far off this position may be, m (POS_UNC_M for a GPS fix, the
+    /// reported accuracy for a phone fix, never less)
+    pub unc: f32,
 }
 
 impl Own {
     pub fn new(lat: i32, lon: i32) -> Own {
-        Own { lat, lon, coslat: cos(lat as f32 * 1e-6 * DEG) }
+        Own { lat, lon, coslat: cos(lat as f32 * 1e-6 * DEG), unc: POS_UNC_M }
     }
     /// From the firmware's semicircles (2^31 = 180 deg).
     pub fn from_semi(lat: i32, lon: i32) -> Own {
@@ -623,17 +626,15 @@ pub fn visible_m(a: &Ac) -> f32 {
     nm * M_PER_NM
 }
 
-/// How big it looks next to an airliner, from the emitter category. The
-/// nearest-wins tiebreak divides distance by this, so a widebody (64 m
-/// wingspan) at 12 nm and a light single (11 m) at 8 nm on the same line
-/// rank about even.
-pub fn size(a: &Ac) -> f32 {
-    match a.cat {
-        0xA5 => 1.6,
-        0xA3 | 0xA4 => 1.2,
-        0xA1 | 0xA7 | 0xB1..=0xB4 | 0xB6 => 0.6,
-        _ => 1.0,
-    }
+/// Natural log for x > 0, within 2e-4: exponent times ln 2, plus the
+/// atanh series on the mantissa (1..2).
+pub fn ln(x: f32) -> f32 {
+    let b = x.to_bits();
+    let e = ((b >> 23) & 0xff) as i32 - 127;
+    let m = f32::from_bits((b & 0x007f_ffff) | 0x3f80_0000);
+    let s = (m - 1.0) / (m + 1.0);
+    let s2 = s * s;
+    e as f32 * 0.693_147_2 + 2.0 * s * (1.0 + s2 * (1.0 / 3.0 + s2 * 0.2))
 }
 
 // ---- matching -----------------------------------------------------------------
@@ -658,13 +659,21 @@ pub const TOL_BASE: f32 = 12.0 * DEG;
 pub const TOL_MAX: f32 = 35.0 * DEG;
 /// Candidates farther than this from the aim line are not offered at all.
 pub const ERR_MAX: f32 = 60.0 * DEG;
-/// Position uncertainty of a report: GPS, the watch's own fix, rounding.
-const POS_UNC_M: f32 = 150.0;
+/// Position uncertainty of a report and of a GPS fix of our own, rounding
+/// included.
+pub const POS_UNC_M: f32 = 150.0;
 /// Uncertainty in when the snapshot was taken versus the aim, s.
 const TIME_UNC_S: f32 = 1.5;
 /// The bearing error shrinks with elevation (cos), but no further than at
 /// 65 degrees up: without the floor a plane straight overhead fits every aim.
 pub const ELEV_FLOOR: f32 = 0.42;
+/// Preference for the nearer plane: score per factor e of straight-line
+/// distance. The compass gives direction only, so a plane passing low and
+/// close and a jet at contrail height in about the same direction look the
+/// same to it; people point at the close one. At 0.7 a plane at 1 nm on the
+/// edge of the aim beats a jet at 20 nm dead ahead, and a 1 nm plane 40 deg
+/// off the aim loses to that jet.
+pub const NEAR: f32 = 0.7;
 
 pub fn tolerance(spread: f32) -> f32 {
     (TOL_BASE + 1.5 * spread).min(TOL_MAX)
@@ -672,12 +681,12 @@ pub fn tolerance(spread: f32) -> f32 {
 
 /// Rank the visible airborne aircraft for an aim along `heading` (rad,
 /// clockwise from true north; None = no compass) with circular spread
-/// `spread` (rad), `dt` seconds after the reply. In-cone candidates come
-/// first, best first: angular error against the cone plus straight-line
-/// distance over size (0.35 per 10 nm for an airliner), so of two planes
-/// along the same line the one that looks bigger wins. Aircraft farther than they can be seen (visible_m) are left out. The
-/// rest follow by angular error. Returns (count,
-/// in-cone count).
+/// `spread` (rad), `dt` seconds after the reply. Best first by one score:
+/// the squared angular error over the cone width, plus NEAR times the log
+/// of the straight-line distance, so a much nearer plane can win from a
+/// little outside the cone. Aircraft farther than they can be seen
+/// (visible_m) or more than ERR_MAX off the aim are left out. Without a
+/// compass, nearest first. Returns (count, in-cone count).
 pub fn rank(acs: &[Ac], own: &Own, dt: f32, heading: Option<f32>, spread: f32, out: &mut [Cand]) -> (usize, usize) {
     let tol = tolerance(spread);
     let mut n = 0;
@@ -702,14 +711,13 @@ pub fn rank(acs: &[Ac], own: &Own, dt: f32, heading: Option<f32>, spread: f32, o
                 if err > ERR_MAX {
                     continue;
                 }
-                // where it really is: GPS and track error plus timing error
-                // at its speed, seen from this distance
-                let unc = POS_UNC_M + a.gs as f32 * (0.1 * 0.5144) * TIME_UNC_S;
+                // where it really is: the error in our position and its
+                // report, plus timing error at its speed, seen from this
+                // distance
+                let unc = own.unc.max(POS_UNC_M) + a.gs as f32 * (0.1 * 0.5144) * TIME_UNC_S;
                 let tol = tol + atan2(unc, dist.max(1.0)).min(TOL_MAX);
                 let r = err / tol;
-                let cone = err <= tol;
-                let s = if cone { r * r + 0.35 * slant / (10.0 * M_PER_NM * size(a)) } else { 10.0 + err };
-                (err, cone, s)
+                (err, err <= tol, r * r + NEAR * ln(slant.max(0.5 * M_PER_NM) / M_PER_NM))
             }
             None => (0.0, false, slant),
         };
@@ -1087,12 +1095,20 @@ pub fn box_ok(x0: i32, y0: i32, x1: i32, y1: i32) -> bool {
 /// Text centred on x 64 at top y, cut a character at a time until it fits
 /// the visible window. Returns the drawn width (0: nothing fitted).
 fn fit_c(d: &mut dyn Draw, f: u8, y: i32, s: &[u8]) -> i32 {
+    fit_x(d, f, y, s, 0)
+}
+
+/// `fit_c`, drawn `bold` + 1 times a pixel apart (1: a bold weight from a
+/// regular font, one pixel wider).
+fn fit_x(d: &mut dyn Draw, f: u8, y: i32, s: &[u8], bold: i32) -> i32 {
     let (h, _) = d.metrics(f);
     let mut n = s.len();
     while n > 0 {
-        let w = d.width(f, &s[..n]);
+        let w = d.width(f, &s[..n]) + bold;
         if box_ok(CX - w / 2, y, CX + (w + 1) / 2, y + h) {
-            d.text(f, CX, y, 1, &s[..n]);
+            for k in 0..=bold {
+                d.text(f, CX - bold / 2 + k, y, 1, &s[..n]);
+            }
             return w;
         }
         n -= 1;
@@ -1243,13 +1259,16 @@ pub struct CardInfo<'a> {
     pub brg: f32,            // true bearing to it, rad
     pub heading: Option<f32>, // live compass heading, rad
     pub route: Option<&'a Route>, // only one that fits where it is
+    /// Why there's no route (empty: none asked for, or still waiting). Takes
+    /// the route's turn on the type line.
+    pub note: &'a [u8],
     pub flip: bool, // type and route share a line: show the type this time
 }
 
 #[inline(never)] // keeps the paint frame small (UI task stack)
 pub fn paint_card(d: &mut dyn Draw, c: &CardInfo) {
     let a = c.ac;
-    let (hm, _) = d.metrics(MED);
+    let (_, am) = d.metrics(MED);
     let (hs, _) = d.metrics(SMALL);
 
     paint_kind(d, kind(a), INSET.0, INSET.1, 18.0);
@@ -1258,11 +1277,12 @@ pub fn paint_card(d: &mut dyn Draw, c: &CardInfo) {
         None => d.text(MED, CX, 2, 1, compass8(c.brg)),
     }
 
-    // Layout for the measured window (on the watch: medium about 22 px a
-    // line, small 16): callsign, type and altitude in the middle, distance
-    // on the short bottom row. How well the aim matched needs no words: the
-    // rim marker shows it. Every line is fitted (cut, never drawn outside)
-    // against the window.
+    // Callsign in bold, then type (or route), altitude, and speed with
+    // distance on the short bottom row. How well the aim matched needs no
+    // words: the rim marker shows it. Every line is fitted (cut, never drawn
+    // outside) against the window. The watch's medium font has a tall cell
+    // (about 27 px for 21 px of ascent), so the lines below the callsign
+    // start under its baseline rather than under its cell.
     let mut b = Buf::new();
 
     // callsign, else registration, else hex
@@ -1276,20 +1296,26 @@ pub fn paint_card(d: &mut dyn Draw, c: &CardInfo) {
             id.c(b"0123456789ABCDEF"[((a.hex >> sh) & 0xf) as usize]);
         }
     }
-    let y0 = 54; // clear of the inset ring below the porthole
-    fit_c(d, MED, y0, id.s());
+    // as high as the inset ring lets this callsign sit (y 54 clears any)
+    let w = d.width(MED, id.s()) + 1;
+    let mut y0 = 48;
+    while y0 < 54 && !box_ok(CX - w / 2, y0, CX + (w + 1) / 2, y0 + am) {
+        y0 += 1;
+    }
+    fit_x(d, MED, y0, id.s(), 1);
 
-    // what it is
-    let y1 = y0 + hm;
+    // what it is: callsigns have no descenders, and the small font has
+    // room above its capitals, so this line starts on the callsign baseline
+    let y1 = y0 + am - 1;
     let rt = b.clear();
     rt.t(type_name(&a.typ).unwrap_or(&a.typ[..flen(&a.typ)]));
     if a.flags & F_MIL != 0 {
         rt.t(b" mil");
     }
-    paint_type_route(d, y1, rt.s(), c.route, c.flip);
+    paint_type_route(d, y1, rt.s(), c.route, c.note, c.flip);
 
     // altitude with climb/descent mark
-    let y2 = y1 + hs + 1;
+    let y2 = y1 + hs;
     let al = b.clear();
     if a.alt == ALT_NONE {
         al.t(b"alt --");
@@ -1311,21 +1337,28 @@ pub fn paint_card(d: &mut dyn Draw, c: &CardInfo) {
         }
     }
 
-    // distance on the narrow bottom row, in tenths under 10 nm when they
-    // fit, else whole; EMERG instead for an emergency squawk
-    let y3 = y2 + hs + 1;
+    // speed and distance on the narrow bottom row: distance in tenths under
+    // 10 nm, whole when that's too wide, and the speed goes first when even
+    // that doesn't fit; EMERG instead for an emergency squawk
+    let y3 = y2 + hs;
     let nm = c.dist_m / M_PER_NM;
-    for whole in [false, true] {
+    for k in 0..4 {
         let m = b.clear();
         if a.flags & F_EMERG != 0 {
             m.t(b"EMERG");
-        } else if !whole && nm < 9.95 {
-            m.tenths(round(nm * 10.0)).t(b" nm");
         } else {
-            m.int(round(nm), false).t(b" nm");
+            if k < 2 && a.gs > 0 {
+                m.int((a.gs as i32 + 5) / 10, false).t(b" kt  ");
+            }
+            if k & 1 == 0 && nm < 9.95 {
+                m.tenths(round(nm * 10.0));
+            } else {
+                m.int(round(nm), false);
+            }
+            m.t(b" nm");
         }
         let w = d.width(SMALL, m.s());
-        if whole || box_ok(CX - w / 2, y3, CX + (w + 1) / 2, y3 + hs) {
+        if k == 3 || box_ok(CX - w / 2, y3, CX + (w + 1) / 2, y3 + hs) {
             fit_c(d, SMALL, y3, m.s());
             break;
         }
@@ -1333,10 +1366,16 @@ pub fn paint_card(d: &mut dyn Draw, c: &CardInfo) {
 }
 
 /// The type line. With a route ("LIS > JFK", a small plane for the arrow)
-/// the two take turns, `flip` picking the type; the line rarely fits both.
+/// or a note on why there's none, the two take turns, `flip` picking the
+/// type; the line rarely fits both.
 #[inline(never)]
-fn paint_type_route(d: &mut dyn Draw, y: i32, typ: &[u8], route: Option<&Route>, flip: bool) {
-    if let Some(r) = route.filter(|_| !flip || typ.is_empty()) {
+fn paint_type_route(d: &mut dyn Draw, y: i32, typ: &[u8], route: Option<&Route>, note: &[u8], flip: bool) {
+    let turn = !flip || typ.is_empty();
+    if turn && route.is_none() && !note.is_empty() {
+        fit_c(d, SMALL, y, note);
+        return;
+    }
+    if let Some(r) = route.filter(|_| turn) {
         let (hs, asc) = d.metrics(SMALL);
         let (f, t) = (&r.from[..flen(&r.from)], &r.to[..flen(&r.to)]);
         const ICON: i32 = 9;

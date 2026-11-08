@@ -55,6 +55,7 @@ Firmware calls are plain function pointers at fixed addresses in 19.10 (`const`s
 |---|---|---|
 | Compass | `COMPASS_REG(period_ms) -> slot`, `COMPASS_GET(&f32) -> valid`, `COMPASS_REL(slot)` | Heading in radians from true north. Register only while you need it, and release on error screens and on destroy. |
 | Position | `POSITION(&pos, 1)` | Last known fix in semicircles. Invalid values: `0x7fffffff`, or 0,0. |
+| Phone position | `LOC_ASK()`, then `PHONE_POS(&rec)` | Asks the phone over the protobuf link; Gadgetbridge answers with Android's last fix. `rec` holds lat/lon in semicircles, the fix time (compare with `GARMIN_NOW`), accuracy in metres and a valid byte. Check `PB_LINK != 0xffff` before asking. See `read_pos` in `plane.rs`. |
 | Phone | `PHONE() -> connected` | Check before any request. |
 | HTTP via phone | `HTTP_INIT(req)`, set URL and callback, `HTTP_SEND(req) -> id` | Gadgetbridge fetches the URL. Allow its host in Gadgetbridge's internet settings. The callback gets `(id, status, body, len, http_code, ctx)`. |
 | Time | `TICK_MS() -> ms` | Monotonic milliseconds. |
@@ -77,7 +78,7 @@ A reply over 64 KB fails (the plane finder shows "unreadable reply"), so keep re
 2. Write `payload/host/<app>test.rs` and `<app>mock.rs` (copy the plane ones) and get the tests passing and the mock screens looking right.
 3. Write `payload/facehook/src/<app>.rs` with the page handler, `open()`, and a `Draw` for the watch (copy `Gfx` from `plane.rs`). Add `mod <app>;` in `lib.rs`, and hook a key event in `page_entry` to open it.
 4. Give your page flags: `page_flags_entry` in `lib.rs` answers for `plane_page`. Add your handler the same way.
-5. Build with `sh tools/build.sh ...` and watch the "free after faces" figure. The face loader and all apps share one region (about 0.6 KB free right now), so size matters. `opt-level=z` and LTO are already on, and the next step is moving code into the nav region or finding more free flash.
+5. Build with `sh tools/build.sh ...` and watch the "free after faces" figure. The face loader and all apps share one region (under 0.1 KB free right now), so size matters. `opt-level=z` and LTO are already on, and the next step is moving code into the nav region or finding more free flash.
 6. Flash with the stock 19.10 file at hand ([RECOVERY.md](RECOVERY.md)).
 
 Ideas that fit the same pattern: a tide or weather detail page, a transit departure board, a phone finder, a "where did I park" compass page.
