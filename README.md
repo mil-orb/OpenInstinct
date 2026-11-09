@@ -78,7 +78,7 @@ The watch's own face settings, including the inset in the top-right porthole, st
 
 1. In Gadgetbridge, turn on Settings, Location, **Keep location updated**, and give Gadgetbridge location permission. Each aim asks the phone where you are. Without it, the watch's last GPS fix is used, which is only as fresh as your last GPS activity.
 2. In Gadgetbridge, turn on internet access for the watch and allow `api.adsb.lol` and `api.adsbdb.com`.
-3. On the watch face, **hold BACK**. Point 12 o'clock at the plane, hold steady while the ring fills, then **let go**.
+3. On the watch face, **hold BACK**. Point 12 o'clock at the plane, hold steady while the ring fills (about 2 seconds), then **let go**.
 
 | Button | Card | Map |
 |---|---|---|
@@ -89,7 +89,9 @@ The watch's own face settings, including the inset in the top-right porthole, st
 
 It searches 25 nm around you and picks the plane nearest your aim, leaning hard toward closer planes. The compass gives a direction but not how high you're pointing, so a plane a mile away near your aim beats a jet at contrail height 20 miles off, even when the compass is up to 40° off. A plane right overhead still counts. In a busy sky it searches again at 10 nm when the 25 nm reply is too big.
 
-While it searches, the screen says which position it's using: "phone position" (a fix from the last 30 minutes, good to 1 km) or "watch GPS fix". An old position throws off the bearing to nearby planes, so if it says "watch GPS fix", check the Gadgetbridge setting above. If it keeps picking the wrong plane, calibrate the compass (watch settings, Sensors, Compass).
+While it searches, the screen says which position it's using: "phone position" (a fix from the last 30 minutes, good to 1 km) or "watch GPS fix". An old position throws off the bearing to nearby planes, so if it says "watch GPS fix", check the Gadgetbridge setting above. The older the phone's fix, the wider it searches around your aim, in case you've walked a way since.
+
+Aim from outside, not from a car. The car's steel body and speaker magnets can pull a watch compass tens of degrees off, and calibrating won't fix that. If it keeps picking the wrong plane outdoors, calibrate the compass (watch settings, Sensors, Compass).
 
 The card shows the callsign in bold, the type, the altitude with a climb or descent arrow, and the speed and distance on the bottom row (the speed drops off when the row is too narrow for both). The small plane on the rim is where it sits from 12 o'clock: under the notch means you're on it, and the dotted trail shows which way to turn. If the compass can't help, the card shows a direction (N, SE...) at the top instead.
 

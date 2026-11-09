@@ -102,8 +102,14 @@ pub const P_PLANE_OFF: &[u8] = b"0:/GARMIN/FACES/PLANEOFF\0";
 
 // ---- tuning -------------------------------------------------------------------
 const TICK_MS_PAGE: u32 = 250;
-const AIM_FROM: u32 = 300; // ms after the aim starts: compass filter settled
-const QUICK_REL: u32 = 500; // let go this soon after the screen opened: wait, no scan
+/// ms after the aim starts before compass samples count. The firmware's
+/// heading filter averages the last 3-6 sensor readings and never clears that
+/// history when the compass stops (FUN_1016b158), so the first ~0.85 s after
+/// COMPASS_REG still blend in readings from the last time the compass ran.
+const AIM_FROM: u32 = 900;
+/// Let go this soon after the screen opened: wait for a second hold, no scan
+/// (the heading isn't trustworthy yet, see AIM_FROM).
+const QUICK_REL: u32 = AIM_FROM;
 const HOLD_MAX: u32 = 30_000; // still held after this: look up anyway
 const WIN: u32 = 1200; // heading samples up to this long before the release...
 const WIN_SKIP: u32 = 120; // ...but not the last moment (the thumb lifting)
@@ -119,6 +125,8 @@ const RETRY_NM: u32 = 10;
 /// hours or days back) when it is at most this old, s, and this good, m.
 const PHONE_AGE_S: i32 = 1800;
 const PHONE_ACC_M: f32 = 1000.0;
+/// How far the user may have walked since the phone's fix, m/s of fix age.
+const PHONE_DRIFT_MPS: f32 = 1.5;
 /// Ask the phone again at most this often, ms
 const LOC_EVERY: u32 = 30_000;
 
@@ -758,7 +766,8 @@ unsafe fn read_pos(st: &mut St) -> bool {
     let age = t.wrapping_sub(p.time) as i32;
     if p.valid == 1 && (-60..=PHONE_AGE_S).contains(&age) && p.acc >= 0.0 && p.acc <= PHONE_ACC_M && semi_ok(p.lat, p.lon) {
         st.own = Own::from_semi(p.lat, p.lon);
-        st.own.unc = p.acc;
+        // the user may have moved since the fix: allow walking pace for its age
+        st.own.unc = p.acc + age.max(0) as f32 * PHONE_DRIFT_MPS;
         st.flags |= F_PHONE_POS;
         return true;
     }
