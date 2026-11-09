@@ -14,7 +14,7 @@ How the repo fits together, how to build it, and how to test changes on your PC 
 | `tools/patchgcd.py`, `gcd.py` | Read and write Garmin's GCD update format. |
 | `tools/bw.py`, `elf2bin.py` | Encode the branch each hook writes, and turn a payload ELF into a flat binary. |
 | `tools/mock/` | Renders the nav and plane screens to PNGs from the same Rust code. |
-| `tools/media/` | Makes the GIFs in `media/`. |
+| `tools/media/` | Makes the GIFs in `media/`. `media/photos/` holds photos of a real watch. |
 | `faces/` | The face kit, the bundled faces' source, and prebuilt examples. |
 
 ## Two payloads

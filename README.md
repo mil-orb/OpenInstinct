@@ -3,10 +3,11 @@
 Custom watch faces and custom apps for the **original Garmin Instinct (2018)**, a watch that never got Connect IQ.
 
 <p align="center">
-  <img src="media/plane_finder.gif" width="256" alt="Plane finder: hold BACK, aim at a plane, let go, see what it is">
-  &nbsp;&nbsp;
-  <img src="media/faces.gif" width="256" alt="A tour of custom watch faces">
+  <img src="media/photos/plane_finder.gif" width="256" alt="Photo of the watch: searching with the phone's position, then the card for a jet 17 nm away at 43,000 ft">
+  <img src="media/photos/music_face.jpg" width="256" alt="Photo of the watch: a face showing the song playing on the phone, with steps, heart rate and battery">
+  <img src="media/photos/navigation.jpg" width="256" alt="Photo of the watch: Google Maps navigation on a native screen">
 </p>
+<p align="center"><sub>On my watch: the plane finder, a face showing the song playing on my phone, and Google Maps navigation (street name blurred).</sub></p>
 
 - **Custom watch faces.** A face is one small file you drag onto the watch over USB. Faces can show the time, date, heart rate, steps, battery, sunrise and sunset, plus weather and the song playing on your phone. 7 faces come prebuilt, the source of 24 is included, and there's a Python kit for making your own with a live preview.
 - **A framework for custom apps.** Apps are small Rust programs that open their own pages in the watch's UI, read the buttons, compass and GPS, draw with the watch's own fonts, and reach the internet through your phone.
@@ -61,6 +62,8 @@ To go back to stock, copy Garmin's untouched `System_1910/GUPDATE.GCD` to the wa
 
 ### Watch faces
 
+<p align="center"><img src="media/faces.gif" width="256" alt="A tour of custom watch faces"></p>
+
 | File on the watch | What it does |
 |---|---|
 | `GARMIN/FACES/ACTIVE.FACE` | The face that's drawn. Up to 32 KB. |
@@ -70,6 +73,8 @@ To go back to stock, copy Garmin's untouched `System_1910/GUPDATE.GCD` to the wa
 The watch's own face settings, including the inset in the top-right porthole, still work. Weather and music come from Gadgetbridge. Turn on weather in Gadgetbridge and play music on the phone.
 
 ### Plane finder
+
+<p align="center"><img src="media/plane_finder.gif" width="256" alt="Plane finder: hold BACK, aim at a plane, let go, see what it is"></p>
 
 1. In Gadgetbridge, turn on Settings, Location, **Keep location updated**, and give Gadgetbridge location permission. Each aim asks the phone where you are. Without it, the watch's last GPS fix is used, which is only as fresh as your last GPS activity.
 2. In Gadgetbridge, turn on internet access for the watch and allow `api.adsb.lol` and `api.adsbdb.com`.
